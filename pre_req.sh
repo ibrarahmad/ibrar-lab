@@ -1,26 +1,60 @@
 #!/bin/bash
 
-# Exit immediately if a command exits with a non-zero status.
 set -e
 
 echo "--- Installing prerequisites ---"
 
-# Update package lists
-sudo apt-get update -y
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+    else
+        echo "Cannot detect OS. Exiting."
+        exit 1
+    fi
+}
 
-# Install Python and pip (if not already present)
-echo "Installing Python and pip..."
-sudo apt-get install -y python3 python3-pip python3-venv
+install_debian_deps() {
+    echo "Detected OS: $OS"
+    sudo apt-get update -y
+    echo "Installing Python and pip..."
+    sudo apt-get install -y python3 python3-pip python3-venv
+    echo "Installing PostgreSQL build dependencies..."
+    sudo apt-get install -y build-essential libreadline-dev zlib1g-dev flex bison \
+        libxml2-dev libxslt-dev libssl-dev libperl-dev libpython3-dev tcl-dev
+}
 
-# Install PostgreSQL build dependencies
-# These are common dependencies for Debian/Ubuntu based systems.
-# Adjust for other distributions (e.g., CentOS, Fedora) if necessary.
-echo "Installing PostgreSQL build dependencies..."
-sudo apt-get install -y build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libxslt-dev libssl-dev libperl-dev libpython3-dev tcl-dev
+install_redhat_deps() {
+    echo "Detected OS: $OS"
+    sudo yum update -y
+    echo "Installing Python and pip..."
+    sudo yum install -y python3 python3-pip
+    # python3-venv is not available on RHEL/CentOS/Rocky, skip it
+    echo "Installing PostgreSQL build dependencies..."
+    sudo yum groupinstall -y "Development Tools"
+    sudo yum install -y readline-devel zlib-devel flex bison libxml2-devel \
+        libxslt-devel openssl-devel perl-devel python3-devel tcl-devel
+}
 
-# Any Python libraries required by pg_script.py can be installed here
-# For example, if configparser is not part of the standard library in the target Python version:
-# echo "Installing Python libraries for pg_script.py..."
-# pip3 install configparser
+install_python_libs() {
+    echo "Installing required Python libraries for pg_script.py..."
+    pip3 install --user argparse configparser
+}
 
-echo "--- Prerequisites installation complete ---"
+main() {
+    detect_os
+    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
+        install_debian_deps
+    elif [[ "$OS" == "centos" || "$OS" == "rhel" || "$OS" == "fedora" || "$OS" == "rocky" ]]; then
+        install_redhat_deps
+    else
+        echo "Unsupported OS: $OS"
+        exit 1
+    fi
+
+    install_python_libs
+
+    echo "--- Prerequisites installation complete ---"
+}
+
+main
