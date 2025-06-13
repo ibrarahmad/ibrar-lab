@@ -1,4 +1,4 @@
-name: Test pg_script
+name: Regression
 
 on: [push, pull_request]
 
