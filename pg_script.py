@@ -182,6 +182,7 @@ def initdb_node(args):
     write_auto_conf(cfg)
     # Modify pg_hba.conf for trust and replication
     modify_pg_hba_conf(cfg)
+
 def compile_node(args):
     cfg = get_node_config(load_config(), args.node_name)
     setup_logging(cfg['log_file'], args.verbose)
@@ -233,6 +234,18 @@ def replica_node(args):
     primary_db = primary_cfg.get('db', 'postgres')
     replica_port = str(replica_cfg.get('port', '5432'))
 
+    # Ensure both 'postgres' and 'replicator' users exist on primary
+    psql = os.path.join(primary_cfg['bin_directory'], "psql")
+    for role in ["postgres", "replicator"]:
+        create_role_cmd = [
+            psql, "-p", primary_port, "-h", primary_ip,
+            "-U", primary_user, "-d", primary_db,
+            "-c", f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') "
+                  f"THEN CREATE ROLE {role} WITH LOGIN{' REPLICATION' if role == 'replicator' else ''} PASSWORD '{role}'; "
+                  f"END IF; END $$;"
+        ]
+        run_command(create_role_cmd, node_log=args.primary_node, verbose=args.verbose, ignore_error=True)
+
     if os.path.exists(replica_cfg['data_directory']):
         if os.listdir(replica_cfg['data_directory']):
             print_error(f"[{args.replica_node}] Data dir not empty.")
@@ -244,15 +257,7 @@ def replica_node(args):
         except Exception:
             pass
 
-    psql = os.path.join(primary_cfg['bin_directory'], "psql")
-    run_command([
-        psql, "-p", primary_port, "-h", primary_ip,
-        "-U", primary_user, "-d", primary_db,
-        "-c", "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'replicator') "
-              "THEN CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD 'replicator'; "
-              "END IF; END $$;"
-    ], node_log=args.primary_node, verbose=args.verbose, ignore_error=True)
-
+    # Reload primary to apply any pg_hba.conf changes (if needed)
     pg_ctl = os.path.join(primary_cfg['bin_directory'], "pg_ctl")
     run_command([pg_ctl, "-D", primary_cfg['data_directory'], "reload"],
                 node_log=args.primary_node, verbose=args.verbose)
@@ -282,8 +287,7 @@ def replica_node(args):
 
     print_success(f"[{args.replica_node}] Replica created.")
     if args.sync:
-        print_info(f"[{args.replica_node}] Configure synchronous_standby_names manually.")
-        
+        print_info(f"[{args.replica_node}] Configure synchronous_standby_names manually.")     
         
 def main():
     parser = argparse.ArgumentParser(
