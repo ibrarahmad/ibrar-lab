@@ -3,7 +3,7 @@ name: Regression
 on: [push, pull_request]
 
 jobs:
-  test:
+  regression:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
