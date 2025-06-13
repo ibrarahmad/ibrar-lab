@@ -1,0 +1,5 @@
+# TYPE  DATABASE        USER            ADDRESS                 METHOD
+host    all             all             127.0.0.1/32            scram-sha-256
+host    replication     repl_user_old   192.168.1.100           md5
+host    replication     repl_user    192.168.1.101/32     scram-sha-256
+host    mydb     another_repl_user    192.168.1.102/32     scram-sha-256
