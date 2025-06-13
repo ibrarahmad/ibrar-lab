@@ -16,67 +16,61 @@ jobs:
           mkdir -p /tmp/postgres_sources
           wget "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" -O "/tmp/postgresql-${PG_VERSION}.tar.bz2"
           tar -xjf "/tmp/postgresql-${PG_VERSION}.tar.bz2" -C /tmp/postgres_sources
-          # The compile command in pg_script.py looks for postgresql-PG_VERSION or postgresql-PG_MAJOR_VERSION
-          # Our pg.conf specifies pg_version = 16.3, so it will look for postgresql-16.3
-          # The tarball extracts to postgresql-16.3, so this should be fine.
 
       - name: Install prerequisites
         run: |
           sudo ./pre_req.sh
 
-      - name: Compile PostgreSQL node1
-        run: python3 pg_script.py -v compile node1 --pg 16.3
+      - name: Compile PostgreSQL n1
+        run: python3 pg_script.py -c reg.conf -v compile n1 --pg 16.3
 
-      - name: Initialize node1
-        run: python3 pg_script.py -v initdb node1
+      - name: Initialize n1
+        run: python3 pg_script.py -c reg.conf -v initdb n1
 
-      - name: Start node1
-        run: python3 pg_script.py -v start node1
+      - name: Start n1
+        run: python3 pg_script.py -c reg.conf -v start n1
 
-      - name: Check status of node1
-        run: python3 pg_script.py -v status node1
+      - name: Check status of n1
+        run: python3 pg_script.py -c reg.conf -v status n1
 
-      - name: Initialize node2
-        run: python3 pg_script.py -v initdb node2
+      - name: Initialize n2
+        run: python3 pg_script.py -c reg.conf -v initdb n2
 
-      # Start and stop node2 before making it a replica.
-      # pg_basebackup in the replica command expects an empty data directory.
-      # initdb creates it, start/stop confirms it works before replica setup.
-      - name: Start node2 (pre-replica)
-        run: python3 pg_script.py -v start node2
+      - name: Start n2 (pre-replica)
+        run: python3 pg_script.py -c reg.conf -v start n2
 
-      - name: Stop node2 (pre-replica)
-        run: python3 pg_script.py -v stop node2
+      - name: Stop n2 (pre-replica)
+        run: python3 pg_script.py -c reg.conf -v stop n2
 
-      - name: Destroy node2 data (for pg_basebackup)
-        run: sudo rm -rf /tmp/pgdata/node2/* # pg_script.py replica command expects data dir to be empty or not exist
+      - name: Destroy n2 data (for pg_basebackup)
+        run: sudo rm -rf /tmp/pgdata/n2/*
 
-      - name: Create replica node2 from node1
-        run: python3 pg_script.py -v replica node1 node2
+      - name: Create replica n2 from n1
+        run: python3 pg_script.py -c reg.conf -v replica n1 n2
 
-      - name: Start node2 (as replica)
-        run: python3 pg_script.py -v start node2
+      - name: Start n2 (as replica)
+        run: python3 pg_script.py -c reg.conf -v start n2
 
-      - name: Check status of node2 (as replica)
-        run: python3 pg_script.py -v status node2
+      - name: Check status of n2 (as replica)
+        run: python3 pg_script.py -c reg.conf -v status n2
 
-      - name: Stop node1
-        run: python3 pg_script.py -v stop node1
+      - name: Stop n1
+        run: python3 pg_script.py -c reg.conf -v stop n1
 
-      - name: Stop node2 (replica)
-        run: python3 pg_script.py -v stop node2
+      - name: Stop n2 (replica)
+        run: python3 pg_script.py -c reg.conf -v stop n2
 
-      - name: Destroy node1
-        run: python3 pg_script.py -v destroy node1
+      - name: Destroy n1
+        run: python3 pg_script.py -c reg.conf -v destroy n1
 
-      - name: Destroy node2
-        run: python3 pg_script.py -v destroy node2
+      - name: Destroy n2
+        run: python3 pg_script.py -c reg.conf -v destroy n2
 
-      - name: Cleanup node1 (destroy + initdb)
-        run: python3 pg_script.py -v cleanup node1
+      - name: Cleanup n1 (destroy + initdb)
+        run: python3 pg_script.py -c reg.conf -v cleanup n1
 
-      - name: Start node1 (after cleanup)
-        run: python3 pg_script.py -v start node1
+      - name: Start n1 (after cleanup)
+        run: python3 pg_script.py -c reg.conf -v start n1
 
-      - name: Stop node1 (after cleanup)
-        run: python3 pg_script.py -v stop node1
+      - name: Stop n1 (after cleanup)
+        run: python3 pg_script.py -c reg.conf -v stop n1

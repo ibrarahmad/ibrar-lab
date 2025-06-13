@@ -35,11 +35,12 @@ def wrap_text(text, width=LINE_WIDTH):
         lines.append(current)
     return "\n".join(lines)
 
-def load_config():
+def load_config(config_file=None):
     config = configparser.ConfigParser()
-    if not os.path.exists(CONFIG_FILE):
-        print_error(f"Configuration file '{CONFIG_FILE}' not found.")
-    config.read(CONFIG_FILE)
+    cfg_file = config_file or CONFIG_FILE
+    if not os.path.exists(cfg_file):
+        print_error(f"Configuration file '{cfg_file}' not found.")
+    config.read(cfg_file)
     return config
 
 def get_node_config(config, node):
@@ -101,8 +102,9 @@ def run_command(cmd, cwd=None, env=None,
         if not ignore_error:
             print_error(f"[{node_log}] Exception occurred.")
         return None, str(e), -1
+
 def status_node(args):
-    cfg = get_node_config(load_config(), args.node_name)
+    cfg = get_node_config(load_config(args.config_file), args.node_name)
     setup_logging(cfg['log_file'], args.verbose)
     pg_ctl = os.path.join(cfg['bin_directory'], "pg_ctl")
     cmd = [pg_ctl, "-D", cfg['data_directory'], "status"]
@@ -117,19 +119,18 @@ def status_node(args):
         print_info(f"[{args.node_name}] Unable to determine status.")
 
 def start_node(args):
-    cfg = get_node_config(load_config(), args.node_name)
+    cfg = get_node_config(load_config(args.config_file), args.node_name)
     setup_logging(cfg['log_file'], args.verbose)
     pg_ctl = os.path.join(cfg['bin_directory'], "pg_ctl")
-    # Use -w (wait) and -t 10 (timeout after 10 seconds)
     cmd = [pg_ctl, "-D", cfg['data_directory'], "-l", cfg['log_file'], "start", "-w", "-t", "10"]
     out, err, code = run_command(cmd, node_log=args.node_name, verbose=args.verbose, ignore_error=True)
     if code == 0:
         print_success(f"[{args.node_name}] PostgreSQL started.")
     else:
         print_error(f"[{args.node_name}] PostgreSQL failed to start. Check log: {cfg['log_file']}")
-    
+
 def stop_node(args):
-    cfg = get_node_config(load_config(), args.node_name)
+    cfg = get_node_config(load_config(args.config_file), args.node_name)
     setup_logging(cfg['log_file'], args.verbose)
     pg_ctl = os.path.join(cfg['bin_directory'], "pg_ctl")
     run_command([pg_ctl, "-D", cfg['data_directory'], "stop", "-m", "fast"],
@@ -142,15 +143,12 @@ def write_auto_conf(cfg):
     """
     auto_conf_path = os.path.join(cfg['data_directory'], "postgresql.auto.conf")
     with open(auto_conf_path, "a") as f:
-        # Always set the port
         f.write(f"port = {cfg['port']}\n")
-        # Write postgres_options as key=value pairs
         options = cfg.get("postgres_options")
         if options:
             for opt in options.replace(",", " ").split():
                 if "=" in opt:
                     f.write(f"{opt}\n")
-        # Write any pgsetting_* keys as key = value
         for k, v in cfg.items():
             if k.startswith("pgsetting_"):
                 setting = k[len("pgsetting_"):]
@@ -170,7 +168,7 @@ def modify_pg_hba_conf(cfg):
         hba.write("host    all             all             ::1/128         trust\n")
 
 def initdb_node(args):
-    cfg = get_node_config(load_config(), args.node_name)
+    cfg = get_node_config(load_config(args.config_file), args.node_name)
     setup_logging(cfg['log_file'], args.verbose)
     if os.path.exists(cfg['data_directory']) and os.listdir(cfg['data_directory']):
         print_error(f"[{args.node_name}] Data dir is not empty.")
@@ -178,13 +176,11 @@ def initdb_node(args):
     initdb = os.path.join(cfg['bin_directory'], "initdb")
     run_command([initdb, "-D", cfg['data_directory']],
                 node_log=args.node_name, verbose=args.verbose)
-    # Add settings from pg.conf to postgresql.auto.conf
     write_auto_conf(cfg)
-    # Modify pg_hba.conf for trust and replication
     modify_pg_hba_conf(cfg)
 
 def compile_node(args):
-    cfg = get_node_config(load_config(), args.node_name)
+    cfg = get_node_config(load_config(args.config_file), args.node_name)
     setup_logging(cfg['log_file'], args.verbose)
     src_base = cfg['source_path']
     pg_version = args.pg
@@ -209,7 +205,7 @@ def compile_node(args):
     print_success(f"[{args.node_name}] PostgreSQL {pg_version} compiled.")
 
 def destroy_node(args):
-    cfg = get_node_config(load_config(), args.node_name)
+    cfg = get_node_config(load_config(args.config_file), args.node_name)
     setup_logging(cfg['log_file'], args.verbose)
     stop_node(args)
     if os.path.exists(cfg['data_directory']):
@@ -222,19 +218,17 @@ def cleanup_node(args):
 
 def replica_node(args):
     import getpass
-    config = load_config()
+    config = load_config(args.config_file)
     primary_cfg = get_node_config(config, args.primary_node)
     replica_cfg = get_node_config(config, args.replica_node)
     setup_logging(replica_cfg['log_file'], args.verbose)
 
-    # Use port, ip, user, db from pg.conf for both primary and replica
     primary_port = str(primary_cfg.get('port', '5432'))
     primary_ip = primary_cfg.get('ip', '127.0.0.1')
     primary_user = primary_cfg.get('user', 'postgres')
     primary_db = primary_cfg.get('db', 'postgres')
     replica_port = str(replica_cfg.get('port', '5432'))
 
-    # Ensure both 'postgres' and 'replicator' users exist on primary
     psql = os.path.join(primary_cfg['bin_directory'], "psql")
     for role in ["postgres", "replicator"]:
         create_role_cmd = [
@@ -257,7 +251,6 @@ def replica_node(args):
         except Exception:
             pass
 
-    # Reload primary to apply any pg_hba.conf changes (if needed)
     pg_ctl = os.path.join(primary_cfg['bin_directory'], "pg_ctl")
     run_command([pg_ctl, "-D", primary_cfg['data_directory'], "reload"],
                 node_log=args.primary_node, verbose=args.verbose)
@@ -271,24 +264,20 @@ def replica_node(args):
         "-U", "replicator", "-R", "-Fp", "-Xs", "-P"
     ], env=env, node_log=args.replica_node, verbose=args.verbose)
 
-    # Overwrite port in postgresql.auto.conf with replica's port from pg.conf
     auto_conf_path = os.path.join(replica_cfg['data_directory'], "postgresql.auto.conf")
-    # Remove any existing port setting
     lines = []
     if os.path.exists(auto_conf_path):
         with open(auto_conf_path, "r") as f:
             lines = [line for line in f if not line.strip().startswith("port =")]
-    # Write back with correct port
     with open(auto_conf_path, "w") as f:
         f.write(f"port = {replica_port}\n")
         f.writelines(lines)
-    # Optionally add other settings from pg.conf
     write_auto_conf(replica_cfg)
 
     print_success(f"[{args.replica_node}] Replica created.")
     if args.sync:
-        print_info(f"[{args.replica_node}] Configure synchronous_standby_names manually.")     
-        
+        print_info(f"[{args.replica_node}] Configure synchronous_standby_names manually.")
+
 def main():
     parser = argparse.ArgumentParser(
         description=wrap_text(
@@ -297,6 +286,8 @@ def main():
 
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable verbose output.")
+    parser.add_argument("-c", "--config", default="pg.conf",
+                        help="Path to config file (default: pg.conf)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     status = subparsers.add_parser("status", help="Check if a node is running.")
@@ -338,6 +329,7 @@ def main():
     replica.set_defaults(func=replica_node)
 
     args = parser.parse_args()
+    args.config_file = args.config
     args.func(args)
 
 if __name__ == "__main__":
