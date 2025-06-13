@@ -1,0 +1,82 @@
+name: Test pg_script
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download PostgreSQL source
+        run: |
+          PG_VERSION="16.3"
+          PG_MAJOR_VERSION=$(echo $PG_VERSION | cut -d. -f1)
+          mkdir -p /tmp/postgres_sources
+          wget "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" -O "/tmp/postgresql-${PG_VERSION}.tar.bz2"
+          tar -xjf "/tmp/postgresql-${PG_VERSION}.tar.bz2" -C /tmp/postgres_sources
+          # The compile command in pg_script.py looks for postgresql-PG_VERSION or postgresql-PG_MAJOR_VERSION
+          # Our pg.conf specifies pg_version = 16.3, so it will look for postgresql-16.3
+          # The tarball extracts to postgresql-16.3, so this should be fine.
+
+      - name: Install prerequisites
+        run: |
+          sudo ./pre_req.sh
+
+      - name: Compile PostgreSQL node1
+        run: python3 pg_script.py -v compile node1 --pg 16.3
+
+      - name: Initialize node1
+        run: python3 pg_script.py -v initdb node1
+
+      - name: Start node1
+        run: python3 pg_script.py -v start node1
+
+      - name: Check status of node1
+        run: python3 pg_script.py -v status node1
+
+      - name: Initialize node2
+        run: python3 pg_script.py -v initdb node2
+
+      # Start and stop node2 before making it a replica.
+      # pg_basebackup in the replica command expects an empty data directory.
+      # initdb creates it, start/stop confirms it works before replica setup.
+      - name: Start node2 (pre-replica)
+        run: python3 pg_script.py -v start node2
+
+      - name: Stop node2 (pre-replica)
+        run: python3 pg_script.py -v stop node2
+
+      - name: Destroy node2 data (for pg_basebackup)
+        run: sudo rm -rf /tmp/pgdata/node2/* # pg_script.py replica command expects data dir to be empty or not exist
+
+      - name: Create replica node2 from node1
+        run: python3 pg_script.py -v replica node1 node2
+
+      - name: Start node2 (as replica)
+        run: python3 pg_script.py -v start node2
+
+      - name: Check status of node2 (as replica)
+        run: python3 pg_script.py -v status node2
+
+      - name: Stop node1
+        run: python3 pg_script.py -v stop node1
+
+      - name: Stop node2 (replica)
+        run: python3 pg_script.py -v stop node2
+
+      - name: Destroy node1
+        run: python3 pg_script.py -v destroy node1
+
+      - name: Destroy node2
+        run: python3 pg_script.py -v destroy node2
+
+      - name: Cleanup node1 (destroy + initdb)
+        run: python3 pg_script.py -v cleanup node1
+
+      - name: Start node1 (after cleanup)
+        run: python3 pg_script.py -v start node1
+
+      - name: Stop node1 (after cleanup)
+        run: python3 pg_script.py -v stop node1
