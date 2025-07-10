@@ -137,22 +137,19 @@ def stop_node(args):
                 node_log=args.node_name, verbose=args.verbose,
                 ignore_error=True)
 
-def write_auto_conf(cfg):
-    """
-    Write all PostgreSQL settings from pg.conf for this node into postgresql.auto.conf.
-    """
-    auto_conf_path = os.path.join(cfg['data_directory'], "postgresql.auto.conf")
-    with open(auto_conf_path, "a") as f:
-        f.write(f"port = {cfg['port']}\n")
-        options = cfg.get("postgres_options")
-        if options:
-            for opt in options.replace(",", " ").split():
-                if "=" in opt:
-                    f.write(f"{opt}\n")
-        for k, v in cfg.items():
-            if k.startswith("pgsetting_"):
-                setting = k[len("pgsetting_"):]
-                f.write(f"{setting} = {v}\n")
+def write_auto_conf(config, node_name):
+    auto_conf_path = os.path.join(config["DEFAULT"]['base_data_directory'], node_name, "postgresql.auto.conf")
+    auto_conf_section = f"postgresql.auto.conf.{node_name}"
+    if not config.has_section(auto_conf_section):
+        print_error(f"Section '{auto_conf_section}' not found in configuration.")
+    excluded_keys = {'source_path', 'base_log_directory', 'base_bin_directory', 'base_data_directory', 'postgres_options'}
+    with open(auto_conf_path, "w") as f:
+        for key, value in config.items(auto_conf_section):
+            if key not in excluded_keys:
+                f.write(f"{key} = {value}\n")
+        # Add primary_slot_name for replica nodes
+        if "replica" in node_name:
+            f.write(f"primary_slot_name = '{node_name}_slot'\n")
 
 def modify_pg_hba_conf(cfg):
     """
@@ -168,7 +165,8 @@ def modify_pg_hba_conf(cfg):
         hba.write("host    all             all             ::1/128         trust\n")
 
 def initdb_node(args):
-    cfg = get_node_config(load_config(args.config_file), args.node_name)
+    config = load_config(args.config_file)  # Load the full ConfigParser object
+    cfg = get_node_config(config, args.node_name)  # Get the node-specific dictionary
     setup_logging(cfg['log_file'], args.verbose)
     if os.path.exists(cfg['data_directory']) and os.listdir(cfg['data_directory']):
         print_error(f"[{args.node_name}] Data dir is not empty.")
@@ -176,9 +174,8 @@ def initdb_node(args):
     initdb = os.path.join(cfg['bin_directory'], "initdb")
     run_command([initdb, "-D", cfg['data_directory']],
                 node_log=args.node_name, verbose=args.verbose)
-    write_auto_conf(cfg)
+    write_auto_conf(config, args.node_name)  # Pass the ConfigParser object
     modify_pg_hba_conf(cfg)
-
 def compile_node(args):
     cfg = get_node_config(load_config(args.config_file), args.node_name)
     setup_logging(cfg['log_file'], args.verbose)
@@ -265,19 +262,16 @@ def replica_node(args):
     ], env=env, node_log=args.replica_node, verbose=args.verbose)
 
     auto_conf_path = os.path.join(replica_cfg['data_directory'], "postgresql.auto.conf")
-    lines = []
-    if os.path.exists(auto_conf_path):
-        with open(auto_conf_path, "r") as f:
-            lines = [line for line in f if not line.strip().startswith("port =")]
-    with open(auto_conf_path, "w") as f:
-        f.write(f"port = {replica_port}\n")
-        f.writelines(lines)
-    write_auto_conf(replica_cfg)
+    write_auto_conf(config, args.replica_node)  # Write all other settings first
+
+    # Append primary_conninfo at the end of postgresql.auto.conf
+    with open(auto_conf_path, "a") as f:
+        f.write(f"primary_conninfo = 'host={primary_ip} application_name=test port={primary_port} "
+                f"user=replicator password=replicator sslmode=prefer'\n")
 
     print_success(f"[{args.replica_node}] Replica created.")
     if args.sync:
         print_info(f"[{args.replica_node}] Configure synchronous_standby_names manually.")
-
 def main():
     parser = argparse.ArgumentParser(
         description=wrap_text(
