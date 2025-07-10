@@ -12,18 +12,11 @@ PG_PATH = "/usr/local/pgsql.17/bin"
 # Update PATH environment variable to include PostgreSQL bin path
 os.environ["PATH"] = f"{PG_PATH}:{os.environ.get('PATH', '')}"
 
-# Define variables for the workflow
-NODES = [
+
+SRC_NODE = [
     {
         "name": "n1",
-        "source": True,
         "dsn": "host=127.0.0.1 dbname=pgedge port=5431 user=pgedge password=pgedge",
-        "location": "Los Angeles",
-        "country": "USA"
-    },
-    {
-        "name": "n2",
-        "dsn": "host=127.0.0.1 dbname=pgedge port=5432 user=pgedge password=pgedge",
         "location": "Los Angeles",
         "country": "USA"
     }
@@ -37,6 +30,37 @@ NEW_NODE = [
         "country": "USA"
     }
 ]
+
+def get_nodes():
+    """
+    Fetches the list of nodes from the PostgreSQL cluster using the DSN of SRC_NODE.
+    Returns a list of dictionaries with node details.
+    """
+    sql = """
+        SELECT node_name, dsn, location, country
+        FROM spock.node;
+    """
+    rc, stdout, stderr = execute_sql(sql, SRC_NODE[0]['dsn'])
+    if rc != 0:
+        print(f"Error fetching nodes: {stderr}")
+        return []
+    nodes = []
+    lines = stdout.strip().splitlines()
+    # Skip header and separator lines
+    for line in lines[2:]:
+        if not line.strip() or line.startswith('('):
+            continue
+        parts = [p.strip() for p in line.split('|')]
+        if len(parts) == 4:
+            nodes.append({
+                "name": parts[0],
+                "dsn": parts[1],
+                "location": parts[2],
+                "country": parts[3]
+            })
+    return nodes
+
+NODES = get_nodes()
 
 # Generate replication slots for all disabled subscriptions
 REPLICATION_SLOTS = [
@@ -53,6 +77,8 @@ def log_step(step_number, description, status, node_name=None):
     aligned_description = f"{description:<50}"  # Align description to a fixed width
     aligned_status = f"[{status}]"  # Align status to ensure consistent formatting
     print(f"[{timestamp}] [Step - {step_number:02}]: {node_info} - {aligned_description} {aligned_status}")
+
+
 # Function to execute SQL commands on a specific DSN
 def execute_sql(sql, conn_info):
     conn_command = f"psql '{conn_info}' -v ON_ERROR_STOP=1 <<'EOF'\n{sql}\nEOF"
