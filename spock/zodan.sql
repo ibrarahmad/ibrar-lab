@@ -1,10 +1,23 @@
--- Main Function: join_node_group
-CREATE OR REPLACE FUNCTION join_node_group(
+-- Helper Function: get_nodes_from_dsn
+CREATE OR REPLACE FUNCTION get_nodes(target_dsn text)
+RETURNS TABLE (node_id oid, node_name text)
+AS
+$$
+BEGIN
+    RETURN QUERY
+    SELECT *
+    FROM dblink(target_dsn, 'SELECT node_id, node_name FROM spock.node', true)
+         AS results(node_id oid, node_name text);
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE OR REPLACE PROCEDURE join_node_group(
     join_target_dsn text,
     node_group_name text,
     pjoin_phase int DEFAULT 1
 )
-RETURNS void
+LANGUAGE plpgsql
 AS
 $$
 DECLARE
@@ -52,10 +65,9 @@ BEGIN
     RAISE LOG E'/CDR/ Phase 3: Setting up disbale subscriptions for nodes other than the source node\n';
     PERFORM setup_disabled_subscriptions(join_target_dsn, joinid, memberid, joinname);
 
-   
     RAISE LOG '/CDR/ Completed join_node_group successfully.';
 END;
-$$ LANGUAGE plpgsql;-- Helper Function: create_or_fetch_local_node
+$$;
 
 
 -- Helper Function: check_commit_timestamp_for_n3_lag
