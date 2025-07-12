@@ -167,6 +167,58 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION sync_event(node_dsn text)
+RETURNS pg_lsn
+LANGUAGE plpgsql
+AS
+$$
+DECLARE
+    sync_rec RECORD;
+    remotesql text;
+BEGIN
+    remotesql := 'SELECT spock.sync_event();';
+
+    RAISE INFO E'[STEP] Remote SQL for sync event: %\n', remotesql;
+
+    SELECT * FROM dblink(node_dsn, remotesql) AS t(lsn pg_lsn) INTO sync_rec;
+    RAISE LOG E'[STEP] Sync event triggered on remote node: % with LSN %', node_dsn, sync_rec.lsn;
+    RETURN sync_rec.lsn;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION wait_for_sync_event(
+    node_dsn text,
+    wait_for_all boolean,
+    provider_node text,
+    sync_lsn pg_lsn,
+    timeout_ms integer
+)
+RETURNS void
+LANGUAGE plpgsql
+AS
+$$
+DECLARE
+    remotesql text;
+    dummy RECORD; -- we need to capture the result
+BEGIN
+    remotesql := format(
+        'CALL spock.wait_for_sync_event(%L, %L, %L::pg_lsn, %s);',
+        wait_for_all,
+        provider_node,
+        sync_lsn::text,
+        timeout_ms
+    );
+
+    RAISE INFO E'[STEP] Remote SQL for waiting for sync event: %', remotesql;
+
+    -- Assign result to dummy to satisfy dblink's record output
+    SELECT * INTO dummy
+    FROM dblink(node_dsn, remotesql) AS t(result text);  -- structure must match
+
+    RAISE LOG E'[STEP] Waited for sync event on remote node: %', node_dsn;
+END;
+$$;
+
 -- Procedure to create a Spock node remotely
 CREATE OR REPLACE PROCEDURE create_node(
     node_name text,
@@ -219,7 +271,7 @@ BEGIN
     );
 
     RAISE INFO E'
-    [STEP 2] Remote SQL for node creation: %
+    [STEP 2] Remote SQL for node creation: %\n
     ', remotesql;
 
     -- Step 3: Execute the node creation on the remote DSN using dblink
@@ -245,8 +297,140 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION get_commit_timestamp(node_dsn text, n1 text, n2 text)
+RETURNS timestamp
+LANGUAGE plpgsql
+AS
+$$
+DECLARE
+    ts_rec RECORD;
+    remotesql text;
+BEGIN
+    remotesql := format(
+        'SELECT commit_timestamp FROM spock.lag_tracker WHERE origin_name = %L AND receiver_name = %L',
+        n1, n2
+    );
+   
+    RAISE INFO E'[STEP] Remote SQL for getting commit timestamp: %\n', remotesql;
+    SELECT * FROM dblink(node_dsn, remotesql) AS t(commit_timestamp timestamp) INTO ts_rec;
+
+    RAISE LOG E'[STEP] Commit timestamp for n3 lag: %', ts_rec.commit_timestamp;
+    RETURN ts_rec.commit_timestamp;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION advance_replication_slot(
+    node_dsn text,
+    slot_name text,
+    sync_timestamp timestamp
+)
+RETURNS void
+LANGUAGE plpgsql
+AS
+$$
+DECLARE
+    remotesql text;
+    slot_advance_result RECORD;
+BEGIN
+    IF sync_timestamp IS NULL THEN
+        RAISE INFO E'[STEP] Commit timestamp is NULL, skipping slot advance for slot "%".', slot_name;
+        RETURN;
+    END IF;
+
+    remotesql := format(
+        'WITH lsn_cte AS (
+            SELECT spock.get_lsn_from_commit_ts(%L, %L::timestamp) AS lsn
+        )
+        SELECT pg_replication_slot_advance(%L, lsn) FROM lsn_cte;',
+        slot_name, sync_timestamp::text, slot_name
+    );
+
+    RAISE INFO E'[STEP] Remote SQL for advancing replication slot: %', remotesql;
+    RAISE INFO E'[STEP] Remote node DSN: %', node_dsn;
+
+    -- Capture the result, even if you don't use it
+    SELECT * FROM dblink(node_dsn, remotesql) INTO slot_advance_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION enable_sub(
+    node_dsn text,
+    sub_name text,
+    immediate boolean DEFAULT true
+)
+RETURNS void
+LANGUAGE plpgsql
+AS
+$$
+DECLARE
+    remotesql text;
+BEGIN
+    remotesql := format(
+        'SELECT spock.sub_enable(subscription_name := %L, immediate := %L);',
+        sub_name, immediate::text
+    );
+    
+    RAISE INFO E'[STEP] Remote SQL for enabling subscription: %\n', remotesql;
+
+    -- Fix: must provide a dummy column definition
+    PERFORM * FROM dblink(node_dsn, remotesql) AS t(result text);
+
+    RAISE LOG E'[STEP] Enabled subscription "%" on remote node: %', sub_name, node_dsn;
+END;
+$$;
+
+
+CREATE OR REPLACE FUNCTION monitor_replication_lag(node_dsn text)
+RETURNS void
+LANGUAGE plpgsql
+AS
+$$
+DECLARE
+    remotesql text;
+BEGIN
+    remotesql := $sql$
+        DO '
+        DECLARE
+            lag_n1_n4 interval;
+            lag_n2_n4 interval;
+            lag_n3_n4 interval;
+        BEGIN
+            LOOP
+                SELECT now() - commit_timestamp INTO lag_n1_n4
+                FROM spock.lag_tracker
+                WHERE origin_name = 'n1' AND receiver_name = 'n4';
+
+                SELECT now() - commit_timestamp INTO lag_n2_n4
+                FROM spock.lag_tracker
+                WHERE origin_name = 'n2' AND receiver_name = 'n4';
+
+                SELECT now() - commit_timestamp INTO lag_n3_n4
+                FROM spock.lag_tracker
+                WHERE origin_name = 'n3' AND receiver_name = 'n4';
+
+                RAISE NOTICE 'n1 → n4 lag: %, n2 → n4 lag: %, n3 → n4 lag: %',
+                             COALESCE(lag_n1_n4::text, 'NULL'),
+                             COALESCE(lag_n2_n4::text, 'NULL'),
+                             COALESCE(lag_n3_n4::text, 'NULL');
+
+                EXIT WHEN lag_n1_n4 IS NOT NULL AND lag_n2_n4 IS NOT NULL AND lag_n3_n4 IS NOT NULL
+                          AND extract(epoch FROM lag_n1_n4) < 59
+                          AND extract(epoch FROM lag_n2_n4) < 59
+                          AND extract(epoch FROM lag_n3_n4) < 59;
+
+                PERFORM pg_sleep(1);
+            END LOOP;
+        END
+        ';
+    $sql$;
+    PERFORM dblink(node_dsn, remotesql);
+    RAISE LOG E'[STEP] Monitoring replication lag on remote node: %', node_dsn;
+END;
+$$;
+
 -- Procedure to add a node and create a custom subscription using only the original arguments
 CREATE OR REPLACE PROCEDURE add_node(
+    src_node_name text,
     src_dsn text,
     new_node_name text,
     new_node_dsn text,
@@ -261,6 +445,8 @@ DECLARE
     rec RECORD;
     dbname text;
     slot_name text;
+    sync_lsn pg_lsn;
+    sync_timestamp timestamp;
 BEGIN
     -- Create the new node
     CALL create_node(
@@ -275,28 +461,30 @@ BEGIN
     [STEP] New node "%" created with DSN: %
     ', new_node_name, new_node_dsn;
 
-    -- Create the subscription on the new node with hardcoded custom arguments
-    PERFORM create_sub(
-        new_node_dsn,
-        'sub_n2_n3',
-        'host=127.0.0.1 dbname=pgedge port=5432 user=pgedge password=spockpass',
-        'ARRAY[''default'', ''default_insert_only'', ''ddl_sql'']',
-        false,
-        false,
-        '{}',
-        '0'::interval,
-        false
-    );
+   FOR rec IN
+        SELECT * FROM get_spock_nodes(src_dsn)
+    LOOP
+        IF rec.node_name = src_node_name THEN
+            CONTINUE;
+        END IF;
 
-    RAISE LOG E'
-    [STEP] Subscription "sub_n2_n3" created on node "%" for provider DSN: %
-    ', new_node_name, 'host=127.0.0.1 dbname=pgedge port=5432 user=pgedge password=spockpass';
+        PERFORM create_sub(
+            new_node_dsn,
+            'sub_'|| rec.node_name || '_' || new_node_name,
+            rec.dsn,
+            'ARRAY[''default'', ''default_insert_only'', ''ddl_sql'']',
+            false,
+            false,
+            '{}',
+            '0'::interval,
+            false
+        );
+    END LOOP;
 
-    -- Show all nodes from src_dsn and create replication slot for each
     FOR rec IN
         SELECT * FROM get_spock_nodes(src_dsn)
     LOOP
-        IF rec.dsn = src_dsn THEN
+        IF rec.node_name = src_node_name THEN
             CONTINUE;
         END IF;
 
@@ -309,7 +497,7 @@ BEGIN
             dbname := 'pgedge';
         END IF;
 
-        slot_name := 'spk_' || dbname || '_' || rec.node_name || '_sub_' || rec.node_name || '_' || new_node_name;
+        slot_name := left('spk_' || dbname || '_' || rec.node_name || '_sub_' || rec.node_name || '_' || new_node_name, 64);
 
         PERFORM create_replication_slot(
             rec.dsn,
@@ -317,5 +505,70 @@ BEGIN
             'spock_output'
         );
     END LOOP;
+
+    FOR rec IN
+        SELECT * FROM get_spock_nodes(src_dsn)
+    LOOP
+        IF rec.node_name != src_node_name THEN
+            SELECT sync_event(rec.dsn) INTO sync_lsn;
+            PERFORM wait_for_sync_event(src_dsn, true, rec.node_name, sync_lsn, 10000);
+        END IF;
+    END LOOP;
+
+    PERFORM create_sub(
+        new_node_dsn,
+        'sub_' || src_node_name || '_' || new_node_name,
+        src_dsn,
+        'ARRAY[''default'', ''default_insert_only'', ''ddl_sql'']',
+        true,
+        true,
+        '{}',
+        '0'::interval,
+        true
+    );
+
+    SELECT sync_event(src_dsn) INTO sync_lsn;
+    PERFORM wait_for_sync_event(new_node_dsn, true, src_node_name, sync_lsn, 10000);
+
+    FOR rec IN
+        SELECT * FROM get_spock_nodes(src_dsn)
+    LOOP
+        IF rec.node_name != src_node_name THEN
+        SELECT get_commit_timestamp(new_node_dsn, src_node_name, rec.node_name) INTO sync_timestamp;
+        slot_name := 'spk_' || dbname || '_' || src_node_name || '_sub_' || rec.node_name || '_' || new_node_name;
+        
+        PERFORM advance_replication_slot(rec.dsn, slot_name, sync_timestamp);
+     END IF;
+    END LOOP;
+
+   
+   FOR rec IN
+        SELECT * FROM get_spock_nodes(src_dsn)
+    LOOP
+        PERFORM create_sub(
+            rec.dsn,
+            'sub_'|| new_node_name || '_' || rec.node_name,
+            new_node_dsn,
+            'ARRAY[''default'', ''default_insert_only'', ''ddl_sql'']',
+            false,
+            false,
+            '{}',
+            '0'::interval,
+            true
+        );
+    END LOOP;
+
+FOR rec IN
+        SELECT * FROM get_spock_nodes(src_dsn)
+    LOOP
+        IF rec.node_name = new_node_name THEN
+            CONTINUE;
+        END IF;
+
+        PERFORM enable_sub(
+            new_node_dsn,
+            'sub_'|| rec.node_name || '_' || new_node_name);
+    END LOOP;
+       
 END;
 $$;

@@ -21,6 +21,12 @@ DEFAULT_NODES = [
         "dsn": "host=127.0.0.1 dbname=pgedge port=5432 user=pgedge password=pgedge",
         "location": "Los Angeles",
         "country": "USA"
+    },
+    {
+        "name": "n3",
+        "dsn": "host=127.0.0.1 dbname=pgedge port=5433 user=pgedge password=pgedge",
+        "location": "Los Angeles",
+        "country": "USA"
     }
 ]
 
