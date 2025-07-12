@@ -1,337 +1,357 @@
 #!/usr/bin/env python3
+"""
+Adds a new node to a Spock cluster using psql (no dblink).
+Each step is logged and all SQL is executed via subprocess.
+"""
 
 import subprocess
-import sys
-from datetime import datetime
+import json
+import time
+from typing import List, Dict, Any, Optional
 import argparse
-import os
 
-# Set PostgreSQL bin path
-PG_PATH = "/usr/local/pgsql.17/bin"
+def log(msg: str):
+    print(f"[LOG] {msg}")
 
-# Update PATH environment variable to include PostgreSQL bin path
-os.environ["PATH"] = f"{PG_PATH}:{os.environ.get('PATH', '')}"
+def info(msg: str):
+    print(f"[INFO] {msg}")
 
-
-SRC_NODE = [
-    {
-        "name": "n1",
-        "dsn": "host=127.0.0.1 dbname=pgedge port=5431 user=pgedge password=pgedge",
-        "location": "Los Angeles",
-        "country": "USA"
-    }
-]
-
-NEW_NODE = [
-    {
-        "name": "n3",
-        "dsn": "host=127.0.0.1 dbname=pgedge port=5433 user=pgedge password=pgedge",
-        "location": "Los Angeles",
-        "country": "USA"
-    }
-]
-
-def get_nodes():
+def run_psql(dsn: str, sql: str, fetch: bool = False) -> Optional[List[Dict[str, Any]]]:
     """
-    Fetches the list of nodes from the PostgreSQL cluster using the DSN of SRC_NODE.
-    Returns a list of dictionaries with node details.
+    Runs a SQL command using psql and returns results as list of dicts if fetch=True.
     """
+    cmd = [
+        "psql",
+        dsn,
+        "-X",
+        "-A",
+        "-t",
+        "-c",
+        sql
+    ]
+    info(f"Running SQL on DSN: {dsn}\nSQL: {sql}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        log(f"SQL failed: {result.stderr.strip()}")
+        return None
+    if fetch:
+        lines = [line for line in result.stdout.strip().split('\n') if line]
+        if not lines:
+            return []
+        # Assume columns are returned in order, split by '|'
+        # You must know the column order for each query
+        return [dict(zip(sql.split("SELECT")[1].split("FROM")[0].replace(" ", "").split(","), line.split("|"))) for line in lines]
+    return None
+
+def get_spock_nodes(dsn: str) -> List[Dict[str, Any]]:
     sql = """
-        SELECT node_name, dsn, location, country
-        FROM spock.node;
+    SELECT n.node_id, n.node_name, n.location, n.country, n.info, i.if_dsn
+    FROM spock.node n
+    JOIN spock.node_interface i ON n.node_id = i.if_nodeid;
     """
-    rc, stdout, stderr = execute_sql(sql, SRC_NODE[0]['dsn'])
-    if rc != 0:
-        print(f"Error fetching nodes: {stderr}")
+    info("[STEP] Fetching Spock nodes from remote cluster")
+    cmd = [
+        "psql",
+        dsn,
+        "-X",
+        "-A",
+        "-F", ",",
+        "-t",
+        "-c",
+        sql
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        log("[STEP] Failed to fetch nodes.")
         return []
-    nodes = []
-    lines = stdout.strip().splitlines()
-    # Skip header and separator lines
-    for line in lines[2:]:
-        if not line.strip() or line.startswith('('):
-            continue
-        parts = [p.strip() for p in line.split('|')]
-        if len(parts) == 4:
-            nodes.append({
-                "name": parts[0],
-                "dsn": parts[1],
-                "location": parts[2],
-                "country": parts[3]
-            })
-    return nodes
+    lines = [line for line in result.stdout.strip().split('\n') if line]
+    columns = ["node_id", "node_name", "location", "country", "info", "dsn"]
+    rows = []
+    for line in lines:
+        values = line.split(",")
+        row = dict(zip(columns, values))
+        rows.append(row)
+    info(f"[STEP] Retrieved {len(rows)} nodes from remote DSN: {dsn}")
+    return rows
 
-NODES = get_nodes()
+def node_exists(dsn: str, node_name: str) -> bool:
+    sql = f"SELECT count(*) FROM spock.node WHERE node_name = '{node_name}';"
+    rows = run_psql(dsn, sql, fetch=True)
+    exists = rows and int(list(rows[0].values())[0]) > 0
+    info(f"[STEP] Node existence check for '{node_name}': {exists}")
+    return exists
 
-# Generate replication slots for all disabled subscriptions
-REPLICATION_SLOTS = [
-    f"spk_pgedge_{node['name']}_sub_{node['name']}_{NEW_NODE[0]['name']}"
-    for node in NODES
-]
-
-SYNC_EVENT_TIMEOUT = 1200000
-APPLY_WORKER_TIMEOUT = 1000
-
-def log_step(step_number, description, status, node_name=None):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    node_info = f"[{node_name}]" if node_name else ""
-    aligned_description = f"{description:<50}"  # Align description to a fixed width
-    aligned_status = f"[{status}]"  # Align status to ensure consistent formatting
-    print(f"[{timestamp}] [Step - {step_number:02}]: {node_info} - {aligned_description} {aligned_status}")
-
-
-# Function to execute SQL commands on a specific DSN
-def execute_sql(sql, conn_info):
-    conn_command = f"psql '{conn_info}' -v ON_ERROR_STOP=1 <<'EOF'\n{sql}\nEOF"
-    result = subprocess.run(conn_command, shell=True, capture_output=True, text=True)
-    return result.returncode, result.stdout, result.stderr
-
-# Function to generate SQL for `node_create`
-def node_create(node_name, dsn, location, country):
+def create_node(dsn: str, node_name: str, location: str, country: str, info_json: str):
+    if node_exists(dsn, node_name):
+        log(f"[STEP] Node '{node_name}' already exists. Skipping creation.")
+        return
     sql = f"""
     SELECT spock.node_create(
-        node_name => '{node_name}',
-        dsn => '{dsn}',
-        location => '{location}',
-        country => '{country}'
+        node_name := '{node_name}',
+        dsn := '{dsn}',
+        location := '{location}',
+        country := '{country}',
+        info := '{info_json}'::jsonb
     );
     """
-    return sql.strip()
+    info(f"[STEP] Creating node '{node_name}' on DSN: {dsn}")
+    run_psql(dsn, sql)
 
-# Function to generate SQL for `sub_create`
-def sub_create(sub_name, provider_dsn, replication_sets=None, synchronize_structure=True, synchronize_data=True, enabled=True):
-    if replication_sets is None:
-        replication_sets = "['default', 'default_insert_only', 'ddl_sql']"
+def subscription_exists(dsn: str, sub_name: str) -> bool:
+    sql = f"SELECT count(*) FROM spock.subscription WHERE sub_name = '{sub_name}';"
+    rows = run_psql(dsn, sql, fetch=True)
+    exists = rows and int(list(rows[0].values())[0]) > 0
+    info(f"[STEP] Subscription existence check for '{sub_name}': {exists}")
+    return exists
 
+def create_sub(
+    node_dsn: str,
+    subscription_name: str,
+    provider_dsn: str,
+    replication_sets: str,
+    synchronize_structure: bool,
+    synchronize_data: bool,
+    forward_origins: str,
+    apply_delay: str,
+    enabled: bool
+):
+    if subscription_exists(node_dsn, subscription_name):
+        log(f"[STEP] Subscription '{subscription_name}' already exists. Skipping creation.")
+        return
     sql = f"""
     SELECT spock.sub_create(
-        subscription_name => '{sub_name}',
-        provider_dsn => '{provider_dsn}',
-        replication_sets => ARRAY{replication_sets},
-        synchronize_structure => {str(synchronize_structure).lower()},
-        synchronize_data => {str(synchronize_data).lower()},
-        forward_origins => ARRAY[]::text[],
-        apply_delay => '0'::interval,
-        force_text_transfer => false,
-        enabled => {str(enabled).lower()}
+        subscription_name := '{subscription_name}',
+        provider_dsn := '{provider_dsn}',
+        replication_sets := {replication_sets},
+        synchronize_structure := {str(synchronize_structure).lower()},
+        synchronize_data := {str(synchronize_data).lower()},
+        forward_origins := {forward_origins},
+        apply_delay := '{apply_delay}',
+        enabled := {str(enabled).lower()}
     );
     """
-    return sql.strip()
+    info(f"[STEP] Creating subscription '{subscription_name}' on DSN: {node_dsn}")
+    run_psql(node_dsn, sql)
 
-# Function to generate SQL for `sub_drop`
-def sub_drop(sub_name):
-    sql = f"SELECT spock.sub_drop(subscription_name => '{sub_name}');"
-    return sql
+def slot_exists(dsn: str, slot_name: str) -> bool:
+    sql = f"SELECT count(*) FROM pg_replication_slots WHERE slot_name = '{slot_name}';"
+    rows = run_psql(dsn, sql, fetch=True)
+    exists = rows and int(list(rows[0].values())[0]) > 0
+    info(f"[STEP] Replication slot existence check for '{slot_name}': {exists}")
+    return exists
 
-# Function to generate SQL for `node_drop`
-def node_drop(node_name):
-    sql = f"SELECT spock.node_drop(node_name => '{node_name}');"
-    return sql
+def create_replication_slot(dsn: str, slot_name: str, plugin: str = "spock_output"):
+    if slot_exists(dsn, slot_name):
+        log(f"[STEP] Replication slot '{slot_name}' already exists. Skipping creation.")
+        return
+    sql = f"SELECT slot_name, lsn FROM pg_create_logical_replication_slot('{slot_name}', '{plugin}');"
+    info(f"[STEP] Creating replication slot '{slot_name}' with plugin '{plugin}' on DSN: {dsn}")
+    run_psql(dsn, sql)
+    
+def sync_event(dsn: str) -> Optional[str]:
+    """
+    Triggers a sync event on the given DSN and returns the resulting LSN.
+    Uses run_psql to execute the SQL.
+    """
+    sql = "SELECT spock.sync_event();"
+    info(f"[STEP] Triggering sync event on DSN: {dsn}")
+    rows = run_psql(dsn, sql, fetch=True)
+    # rows is a list of dicts, but the key may be missing; fallback to first value
+    if rows and len(rows[0].values()) > 0:
+        lsn = list(rows[0].values())[0]
+    else:
+        lsn = None
+    log(f"[STEP] Sync event triggered on DSN: {dsn} with LSN {lsn}")
+    return lsn
 
-def add_node_workflow(verbose):
-    steps = []
+def wait_for_sync_event(
+    dsn: str,
+    wait_for_all: bool,
+    provider_node: str,
+    sync_lsn: str,
+    timeout_ms: int
+):
+    sql = f"CALL spock.wait_for_sync_event({str(wait_for_all).lower()}, '{provider_node}', '{sync_lsn}', {timeout_ms});"
+    info(f"[STEP] Waiting for sync event on DSN: {dsn} for provider '{provider_node}' at LSN {sync_lsn}")
+    run_psql(dsn, sql)
 
-    # Step 1: Create the new node
-    steps.append({
-        "description": f"Create node {NEW_NODE[0]['name']} in the cluster",
-        "sql": node_create(NEW_NODE[0]['name'], NEW_NODE[0]['dsn'], NEW_NODE[0]['location'], NEW_NODE[0]['country']),
-        "conn_info": NEW_NODE[0]['dsn'],
-        "node_name": NEW_NODE[0]['name']
-    })
+def get_commit_timestamp(dsn: str, origin: str, receiver: str) -> Optional[str]:
+    sql = f"SELECT commit_timestamp FROM spock.lag_tracker WHERE origin_name = '{origin}' AND receiver_name = '{receiver}';"
+    info(f"[STEP] Getting commit timestamp for lag from '{origin}' to '{receiver}' on DSN: {dsn}")
+    rows = run_psql(dsn, sql, fetch=True)
+    ts = rows[0]['commit_timestamp'] if rows else None
+    log(f"[STEP] Commit timestamp for lag: {ts}")
+    return ts
 
-    # Step 2-3: Create subscriptions from the new node to existing nodes
-    for node in NODES:
-        steps.append({
-            "description": f"Create a subscription (sub_{NEW_NODE[0]['name']}_{node['name']})",
-            "sql": sub_create(
-                sub_name=f"sub_{NEW_NODE[0]['name']}_{node['name']}",
-                provider_dsn=NEW_NODE[0]['dsn']
-            ),
-            "conn_info": node['dsn'],
-            "node_name": node['name']
-        })
+def advance_replication_slot(dsn: str, slot_name: str, sync_timestamp: str):
+    if not sync_timestamp:
+        log(f"[STEP] Commit timestamp is NULL, skipping slot advance for slot '{slot_name}'.")
+        return
+    sql = f"""
+    WITH lsn_cte AS (
+        SELECT spock.get_lsn_from_commit_ts('{slot_name}', '{sync_timestamp}') AS lsn
+    )
+    SELECT pg_replication_slot_advance('{slot_name}', lsn) FROM lsn_cte;
+    """
+    info(f"[STEP] Advancing replication slot '{slot_name}' to commit timestamp {sync_timestamp} on DSN: {dsn}")
+    run_psql(dsn, sql)
 
-    # Step 4: Wait for the apply worker to complete on the last node
-    steps.append({
-        "description": f"Wait for the apply worker",
-        "sql": f"SELECT spock.wait_for_apply_worker(${2}, {APPLY_WORKER_TIMEOUT});",
-        "conn_info": NODES[1]['dsn'],
-        "ignore_error": True,
-        "node_name": NODES[1]['name']
-    })
+def enable_sub(dsn: str, sub_name: str, immediate: bool = True):
+    sql = f"SELECT spock.sub_enable(subscription_name := '{sub_name}', immediate := {str(immediate).lower()});"
+    info(f"[STEP] Enabling subscription '{sub_name}' on DSN: {dsn}")
+    run_psql(dsn, sql)
 
-    # Step 5: Create subscriptions from existing nodes to the new node
-    for node in NODES:
-        steps.append({
-            "description": f"Create Subscription (sub_{node['name']}_{NEW_NODE[0]['name']}) [disabled]",
-            "sql": sub_create(
-                sub_name=f"sub_{node['name']}_{NEW_NODE[0]['name']}",
-                provider_dsn=node['dsn'],
-                synchronize_structure=False,
-                synchronize_data=False,
-                enabled=False
-            ),
-            "conn_info": NEW_NODE[0]['dsn'],
-            "node_name": NEW_NODE[0]['name']
-        })
+def monitor_replication_lag(dsn: str):
+    sql = """
+    DO $$
+    DECLARE
+        lag_n1_n4 interval;
+        lag_n2_n4 interval;
+        lag_n3_n4 interval;
+    BEGIN
+        LOOP
+            SELECT now() - commit_timestamp INTO lag_n1_n4
+            FROM spock.lag_tracker
+            WHERE origin_name = 'n1' AND receiver_name = 'n4';
 
-    # Step 6: Create replication slots for disabled subscriptions
-    for node in NODES:
-        if not node.get("source", False):
-            slot_name = f"spk_{NEW_NODE[0]['dsn'].split(' ')[1].split('=')[1]}_{node['name']}_sub_{node['name']}_{NEW_NODE[0]['name']}"
-            steps.append({
-                "description": f"Create replication slot {slot_name}",
-                "sql": f"SELECT pg_create_logical_replication_slot('{slot_name}', 'spock_output');",
-                "conn_info": NEW_NODE[0]['dsn'],
-                "node_name": NEW_NODE[0]['name']
-            })
+            SELECT now() - commit_timestamp INTO lag_n2_n4
+            FROM spock.lag_tracker
+            WHERE origin_name = 'n2' AND receiver_name = 'n4';
 
-    # Step 7: Trigger synchronization events and wait for them
-    for i, node in enumerate(NODES):
-        if node.get("source", False):
-            steps.append({
-                "description": f"Trigger a synchronization event on {node['name']}",
-                "sql": "SELECT spock.sync_event();",
-                "conn_info": node['dsn'],
-                "node_name": node['name']
-            })
-            steps.append({
-                "description": f"Wait for the synchronization event triggered by {node['name']} to complete",
-                "sql": f"CALL spock.wait_for_sync_event(true, '{node['name']}', ${len(steps)}::pg_lsn, {SYNC_EVENT_TIMEOUT});",
-                "conn_info": NEW_NODE[0]['dsn'],
-                "ignore_error": True,
-                "node_name": NEW_NODE[0]['name']
-            })
+            SELECT now() - commit_timestamp INTO lag_n3_n4
+            FROM spock.lag_tracker
+            WHERE origin_name = 'n3' AND receiver_name = 'n4';
 
-    # Step 8: Check replication lags
-    steps.append({
-        "description": "Check the replication lags between nodes",
-        "sql": """
-        DO $$ 
-        DECLARE
-            lag_n1_n3 interval;
-            lag_n2_n3 interval;
-        BEGIN
-            LOOP
-                SELECT now() - commit_timestamp INTO lag_n1_n3
-                FROM spock.lag_tracker
-                WHERE origin_name = 'n1' AND receiver_name = 'n3';
+            RAISE NOTICE 'n1 → n4 lag: %, n2 → n4 lag: %, n3 → n4 lag: %',
+                         COALESCE(lag_n1_n4::text, 'NULL'),
+                         COALESCE(lag_n2_n4::text, 'NULL'),
+                         COALESCE(lag_n3_n4::text, 'NULL');
 
-                SELECT now() - commit_timestamp INTO lag_n2_n3
-                FROM spock.lag_tracker
-                WHERE origin_name = 'n2' AND receiver_name = 'n3';
+            EXIT WHEN lag_n1_n4 IS NOT NULL AND lag_n2_n4 IS NOT NULL AND lag_n3_n4 IS NOT NULL
+                      AND extract(epoch FROM lag_n1_n4) < 59
+                      AND extract(epoch FROM lag_n2_n4) < 59
+                      AND extract(epoch FROM lag_n3_n4) < 59;
 
-                RAISE NOTICE 'n1 → n3 lag: %, n2 → n3 lag: %',
-                             COALESCE(lag_n1_n3::text, 'NULL'),
-                             COALESCE(lag_n2_n3::text, 'NULL');
+            PERFORM pg_sleep(1);
+        END LOOP;
+    END
+    $$;
+    """
+    info(f"[STEP] Monitoring replication lag on DSN: {dsn}")
+    run_psql(dsn, sql)
 
-                EXIT WHEN lag_n1_n3 IS NOT NULL AND lag_n2_n3 IS NOT NULL
-                          AND extract(epoch FROM lag_n1_n3) < 59
-                          AND extract(epoch FROM lag_n2_n3) < 59;
+def add_node(
+    src_node_name: str,
+    src_dsn: str,
+    new_node_name: str,
+    new_node_dsn: str,
+    new_node_location: str = "NY",
+    new_node_country: str = "USA",
+    new_node_info: str = "{}"
+):
+    """
+    Adds a new node to the Spock cluster.
+    """
+    log(f"[STEP 1] Creating new node '{new_node_name}'")
+    create_node(new_node_dsn, new_node_name, new_node_location, new_node_country, new_node_info)
 
-                PERFORM pg_sleep(1);
-            END LOOP;
-        END
-        $$;
-        """.strip(),
-        "conn_info": NEW_NODE[0]['dsn'],
-        "node_name": NEW_NODE[0]['name']
-    })
+    nodes = get_spock_nodes(src_dsn)
+    for rec in nodes:
+        if rec['node_name'] == src_node_name:
+            continue
+        sub_name = f"sub_{rec['node_name']}_{new_node_name}"
+        create_sub(
+            new_node_dsn,
+            sub_name,
+            rec['dsn'],
+            "ARRAY['default', 'default_insert_only', 'ddl_sql']",
+            False,
+            False,
+            "'{}'",
+            "0",
+            False
+        )
 
-    outputs = execute_steps(steps, verbose)
+    for rec in nodes:
+        if rec['node_name'] == src_node_name:
+            continue
+        dbname = rec['dsn'].split("dbname=")[1].split()[0] if "dbname=" in rec['dsn'] else "pgedge"
+        slot_name = f"spk_{dbname}_{rec['node_name']}_sub_{rec['node_name']}_{new_node_name}"[:64]
+        create_replication_slot(rec['dsn'], slot_name)
 
-def remove_node_workflow(verbose):
-    steps = []
+    for rec in nodes:
+        if rec['node_name'] != src_node_name:
+            sync_lsn = sync_event(rec['dsn'])
+            wait_for_sync_event(src_dsn, True, rec['node_name'], sync_lsn, 10000)
 
-    # Drop subscriptions on the new node
-    for node in NODES:
-        steps.append({
-            "description": f"Drop subscription (sub_{node['name']}_{NEW_NODE[0]['name']})",
-            "sql": sub_drop(f"sub_{node['name']}_{NEW_NODE[0]['name']}"),
-            "conn_info": NEW_NODE[0]['dsn'],
-            "ignore_error": True,
-            "node_name": NEW_NODE[0]['name']
-        })
+    sub_name = f"sub_{src_node_name}_{new_node_name}"
+    create_sub(
+        new_node_dsn,
+        sub_name,
+        src_dsn,
+        "ARRAY['default', 'default_insert_only', 'ddl_sql']",
+        True,
+        True,
+        "'{}'",
+        "0",
+        True
+    )
+    sync_lsn = sync_event(src_dsn)
+    wait_for_sync_event(new_node_dsn, True, src_node_name, sync_lsn, 10000)
 
-    # Drop subscriptions on existing nodes
-    for node in NODES:
-        steps.append({
-            "description": f"Drop subscription (sub_{NEW_NODE[0]['name']}_{node['name']})",
-            "sql": sub_drop(f"sub_{NEW_NODE[0]['name']}_{node['name']}"),
-            "conn_info": node['dsn'],
-            "ignore_error": True,
-            "node_name": node['name']
-        })
+    for rec in nodes:
+        if rec['node_name'] != src_node_name:
+            sync_timestamp = get_commit_timestamp(new_node_dsn, src_node_name, rec['node_name'])
+            dbname = rec['dsn'].split("dbname=")[1].split()[0] if "dbname=" in rec['dsn'] else "pgedge"
+            slot_name = f"spk_{dbname}_{src_node_name}_sub_{rec['node_name']}_{new_node_name}"
+            advance_replication_slot(rec['dsn'], slot_name, sync_timestamp)
 
-    # Drop the new node
-    steps.append({
-        "description": f"Drop node {NEW_NODE[0]['name']}",
-        "sql": node_drop(NEW_NODE[0]['name']),
-        "conn_info": NEW_NODE[0]['dsn'],
-        "ignore_error": True,
-        "node_name": NEW_NODE[0]['name']
-    })
+    for rec in nodes:
+        sub_name = f"sub_{new_node_name}_{rec['node_name']}"
+        create_sub(
+            rec['dsn'],
+            sub_name,
+            new_node_dsn,
+            "ARRAY['default', 'default_insert_only', 'ddl_sql']",
+            False,
+            False,
+            "'{}'",
+            "0",
+            True
+        )
 
-    execute_steps(steps, verbose)
+    for rec in nodes:
+        if rec['node_name'] == new_node_name:
+            continue
+        sub_name = f"sub_{rec['node_name']}_{new_node_name}"
+        enable_sub(new_node_dsn, sub_name)
 
-def execute_steps(steps, verbose=0):
-    step_outputs = {}
+    log("[STEP] Node addition complete.")
 
-    for i, step in enumerate(steps, start=1):
-        desc = step["description"]
-        sql = step["sql"]
-        conn_info = step.get("conn_info")
-        ignore_error = step.get("ignore_error", False)
-        node_name = step.get("node_name")  # Extract node name for logging
+    
+def main():
+    parser = argparse.ArgumentParser(
+        description="Add a new node to a Spock cluster using psql."
+    )
+    parser.add_argument("--src-node-name", required=True, help="Source node name")
+    parser.add_argument("--src-dsn", required=True, help="Source node DSN")
+    parser.add_argument("--new-node-name", required=True, help="New node name")
+    parser.add_argument("--new-node-dsn", required=True, help="New node DSN")
+    parser.add_argument("--new-node-location", default="NY", help="New node location")
+    parser.add_argument("--new-node-country", default="USA", help="New node country")
+    parser.add_argument("--new-node-info", default="{}", help="New node info JSON")
 
-        for key in sorted(step_outputs.keys(), key=lambda x: -len(str(x))):
-            placeholder = f"${key}"
-            sql = sql.replace(placeholder, step_outputs[key])
-
-        if verbose >= 1:
-            print(f"Executing on: {conn_info}")
-        if verbose == 2:
-            print(f"SQL Query:\n{sql}\n")
-
-        rc, stdout, stderr = execute_sql(sql, conn_info)
-
-        if rc == 0:
-            output_lines = stdout.strip().splitlines()
-            extracted = ""
-            for line in reversed(output_lines):
-                line = line.strip()
-                if line and not line.startswith("(") and not line.startswith("sub_create") and not line.startswith("node_create"):
-                    extracted = line
-                    break
-
-            if "/" in extracted:
-                step_outputs[i] = f"'{extracted}'"
-            else:
-                step_outputs[i] = extracted
-
-            if verbose >= 1:
-                print(stdout)
-            log_step(i, desc, "OK", node_name)
-        elif ignore_error:
-            step_outputs[i] = ""
-            if verbose >= 1:
-                print(f"\033[93m{stderr}\033[0m")
-            log_step(i, desc, "IGNORED", node_name)
-        else:
-            if verbose >= 1:
-                print(f"\033[91m{stderr}\033[0m")
-            log_step(i, desc, "FAILED", node_name)
-            sys.exit(f"\033[91mStep failed: {desc}\033[0m")
-
-    return step_outputs
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Spock Node Management")
-    parser.add_argument("-a", "--add-node", action="store_true", help="Add a new node (default)")
-    parser.add_argument("-r", "--remove-node", action="store_true", help="Remove an existing node")
-    parser.add_argument("-v", "--verbose", type=int, choices=[0, 1, 2], default=0, help="Set verbosity level (0: steps only, 1: steps and output, 2: steps, query, and output)")
     args = parser.parse_args()
 
-    if args.remove_node:
-        remove_node_workflow(args.verbose)
-    else:
-        add_node_workflow(args.verbose)
+    add_node(
+        args.src_node_name,
+        args.src_dsn,
+        args.new_node_name,
+        args.new_node_dsn,
+        args.new_node_location,
+        args.new_node_country,
+        args.new_node_info
+    )
+
+if __name__ == "__main__":
+        main()
