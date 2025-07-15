@@ -1,6 +1,6 @@
 # PostgreSQL Management Script (pg_script.py)
 
-A Python script for managing PostgreSQL instances, including compilation from source, initialization, replication setup, and operational control (start, stop, restart, cleanup, destroy).
+A Python script for managing PostgreSQL instances, including compilation from source, initialization, replication setup, and operational control (start, stop, status, cleanup, destroy).
 
 ## Prerequisites
 
@@ -17,57 +17,84 @@ A Python script for managing PostgreSQL instances, including compilation from so
 
 ## Configuration (`pg.conf`)
 
-The `pg_script.py` uses a configuration file named `pg.conf` (in INI format) located in the same directory as the script.
+The `pg_script.py` uses a configuration file named `pg.conf` (in INI format). By default, it looks for this file in the current directory from which the script is executed. You can specify a different path using the `-c` or `--config` command-line option.
 
 **Structure:**
 
-*   **`[DEFAULT]` Section:** Defines default values applicable to all nodes unless overridden in a node-specific section.
-    *   `source_path`: Absolute path to the directory containing PostgreSQL source code folders (e.g., `/usr/local/src/postgres/`).
-    *   `base_data_directory`: Base directory where data directories for each node will be created (e.g., `/var/lib/pgsql/nodes/`). A subdirectory named after the node (e.g., `n1`) will be created here.
-    *   `base_log_directory`: Base directory where log files for each node will be stored (e.g., `/var/log/pgsql/nodes/`). Logs will be named `[node_name].log`.
-    *   `base_bin_directory`: Base directory where compiled PostgreSQL versions will be installed (e.g., `/opt/postgres/`). Binaries for a version (e.g., 17) will be in a subdirectory like `pgsql-17`.
+*   **`[DEFAULT]` Section:** Defines default values applicable to all nodes unless overridden in a node-specific section. Paths can be absolute or relative to the script's current working directory.
+    *   `source_path`: Path to the directory containing PostgreSQL source code folders (e.g., `/path/to/postgres_sources/` or `../postgres_sources/`).
+    *   `base_data_directory`: Base directory where data directories for each node will be created (e.g., `./data/nodes/` or `/var/lib/pgsql/nodes/`). A subdirectory named after the node (e.g., `n1`) will be created here.
+    *   `base_log_directory`: Base directory where log files for each node will be stored (e.g., `./logs/` or `/var/log/pgsql/nodes/`). Logs will be named `[node_name].log`.
+    *   `base_bin_directory`: Base directory where compiled PostgreSQL versions will be installed (e.g., `/opt/pgversions/` or `./pgversions/`). Binaries for a version (e.g., 17) will be in a subdirectory like `pgsql-17`.
+    *   `pg_version`: (Optional) Default PostgreSQL version string (e.g., `17`) to use if not specified in a node's section. The script defaults to "17" if not set here or in the node's config.
 
-*   **Node-Specific Sections (e.g., `[n1]`, `[n2]`):** Define configuration for individual PostgreSQL nodes.
+*   **Node-Specific Sections (e.g., `[n1]`, `[n2]`):** Define configuration for individual PostgreSQL nodes. These inherit from `[DEFAULT]`.
     *   `port`: The port number for this PostgreSQL instance (e.g., `5432`). **Required.**
-    *   `pg_version`: The PostgreSQL version string (e.g., `17`, `16.3`) that this node should use. This tells the script where to find the binaries (relative to `base_bin_directory`/pgsql-<version>/bin) for operations like `initdb`, `start`, etc. Ensure this matches a compiled version if you used the `compile` command.
-    *   `host`: (Optional) Hostname or IP address for the node. Defaults to `localhost`. Useful for replication if nodes are on different interfaces/machines.
-    *   `replication_user`: (Optional, for primary nodes) The PostgreSQL username to be used for replication connections by replicas. Defaults to `postgres`.
-    *   `pgsetting_*`: (Optional) Custom settings to be added to the node's `postgresql.auto.conf` during `initdb`. Example: `pgsetting_max_connections = 150`.
+    *   `pg_version`: (Optional) The PostgreSQL version string (e.g., `17`, `16.3`) for this node. Overrides `[DEFAULT].pg_version`. Used to locate binaries.
+    *   `ip`: (Optional) IP address for the node. Defaults to `127.0.0.1` in some contexts (e.g., replication setup if not specified).
+    *   `user`: (Optional) PostgreSQL username, often used for initial connections or administrative tasks on the node. (e.g., `postgres`, `pgedge`).
+    *   `db`: (Optional) Default database name for connections. (e.g., `postgres`).
+    *   Note on replication users: The script primarily uses a hardcoded user `replicator` (with password `replicator`) for setting up streaming replication via `pg_basebackup` and for entries in `pg_hba.conf`. The `user` field might be used by the script to connect to the primary to create roles if they don't exist.
+
+*   **`[postgresql.auto.conf.nodename]` Sections (e.g., `[postgresql.auto.conf.n1]`):**
+    *   This section defines custom settings that will be written directly into the `postgresql.auto.conf` file for the specified node (`nodename`) during `initdb`.
+    *   Each key-value pair in this section becomes a line in `postgresql.auto.conf`. For example, `max_connections = 150` becomes `max_connections = 150`.
+    *   This replaces the old `pgsetting_*` mechanism.
 
 **Example `pg.conf`:**
 ```ini
 [DEFAULT]
-source_path = /usr/local/pgsql/source
-base_data_directory = /var/lib/pgsql/pgnodes
-base_log_directory = /var/log/pgsql/pgnodes
-base_bin_directory = /opt/pgversions
+source_path = /path/to/pgsources  # Or relative: sources/
+base_data_directory = ./data      # Data directories will be ./data/n1, ./data/n2 etc.
+base_log_directory = ./logs       # Log files will be ./logs/n1.log, etc.
+base_bin_directory = ./pginstalls # Binaries at ./pginstalls/pgsql-17, etc.
+pg_version = 17                   # Default PG version for nodes
 
 [n1]
 port = 5432
-pg_version = 17
-host = localhost
-# Settings for n1's postgresql.auto.conf
-pgsetting_max_connections = 100
-pgsetting_shared_buffers = 256MB
-pgsetting_wal_buffers = 16MB
+ip = 127.0.0.1
+user = pgedge
+# pg_version = 17 (inherits from DEFAULT)
+
+[postgresql.auto.conf.n1]
+# Custom settings for n1's postgresql.auto.conf
+listen_addresses = '*'
+max_connections = 100
+shared_buffers = 256MB
+wal_level = replica             # Important for primary node in replication
+max_wal_senders = 10            # Important for primary node in replication
+# archive_mode = on             # Example for PITR
+# archive_command = 'cp %p /path/to/archive/%f'
 
 [n2]
 port = 5433
-pg_version = 17
-host = localhost
-# n2 might be a replica, so fewer custom settings typically needed here initially
+ip = 127.0.0.1
+user = pgedge
+# pg_version = 17 (inherits from DEFAULT)
+
+[postgresql.auto.conf.n2]
+# Custom settings for n2's postgresql.auto.conf
+listen_addresses = '*'
+# For a replica, many settings are mirrored or determined by recovery process
+# specific replica settings like hot_standby might go here.
+hot_standby = on
 ```
 
 ## Usage
 
-Run the script from its directory: `python3 pg_script.py <command> [options]` or `./pg_script.py <command> [options]` (if executable).
+It's recommended to run the script from the root of the repository. The script itself is located in the `scripts/` directory.
+Example: `python3 scripts/pg_script.py <command> [options]` or `./scripts/pg_script.py <command> [options]` (if executable and you are in the repo root).
+
+If you are in the `scripts/` directory, you can run it as `python3 pg_script.py <command> [options]` or `./pg_script.py <command> [options]`.
 
 **Global Options:**
 *   `--help`: Show the main help message and exit.
+*   `-c CONFIG_FILE, --config CONFIG_FILE`: Path to the configuration file (default: `pg.conf` in the current working directory).
+*   `-v, --verbose`: Enable verbose output, showing commands being run and their immediate output.
 
 **Commands:**
 
-Use `pg_script.py <command> --help` for detailed help on a specific command.
+Use `scripts/pg_script.py <command> --help` for detailed help on a specific command.
 
 *   **`compile <node_name> [--pg VERSION]`**
     *   Compiles PostgreSQL from source.
@@ -77,16 +104,22 @@ Use `pg_script.py <command> --help` for detailed help on a specific command.
 
 *   **`initdb <node_name>`**
     *   Initializes a new PostgreSQL cluster for the specified node.
-    *   `<node_name>`: The node (defined in `pg.conf`) to initialize. The script uses the node's `data_directory` (derived from `base_data_directory`), `port`, and `pg_version` (to find `initdb` executable).
-    *   Any `pgsetting_*` values in the node's section in `pg.conf` are applied to `postgresql.auto.conf`.
+    *   `<node_name>`: The node (defined in `pg.conf`) to initialize. Uses the node's `data_directory`, `port`, and `pg_version`.
+    *   PostgreSQL settings from the `[postgresql.auto.conf.nodename]` section in `pg.conf` are written to the node's `postgresql.auto.conf` file.
+    *   Modifies the node's `pg_hba.conf` to:
+        *   Trust local connections (IPv4 and IPv6) for all users.
+        *   Allow replication connections from localhost for the `replicator` user.
 
 *   **`replica <primary_node> <replica_node> [--sync|--async]`**
     *   Sets up `<replica_node>` as a streaming read replica of `<primary_node>`.
-    *   `<primary_node>`: Name of the primary node. Must be initialized, running, and configured for replication (e.g., `wal_level=replica`, `max_wal_senders > 0`, correct `pg_hba.conf`).
-    *   `<replica_node>`: Name of the new node to become the replica. Its data directory must be empty. Its `pg.conf` settings (port, pg_version for `pg_basebackup`) are used.
+    *   `<primary_node>`: Name of the primary node. Must be initialized and running. The script will attempt to create `postgres` and `replicator` roles (with password 'replicator') on the primary if they don't exist, and then reload the primary. Ensure the primary's `pg_hba.conf` allows connection from the script/replica for this (typically handled if primary was also set up with `initdb` from this script). The primary's `postgresql.auto.conf` should have `wal_level = replica` (or higher) and adequate `max_wal_senders`.
+    *   `<replica_node>`: Name of the new node to become the replica. Its data directory must be empty. Its `pg.conf` settings (port, pg_version, etc.) are used.
     *   `--async`: (Default) Configures asynchronous replication.
-    *   `--sync`: Configures for synchronous replication. **Note:** This option mainly sets up the replica side. You must manually configure `synchronous_standby_names` in the primary's `postgresql.conf` and restart/reload the primary.
-    *   Uses `pg_basebackup` for the setup.
+    *   `--sync`: Configures for synchronous replication. The script will note that `synchronous_standby_names` needs manual configuration on the primary.
+    *   Uses `pg_basebackup` with the user `replicator` and password `replicator` (this password can be overridden by setting `replicator_password=yourpass` in the primary node's section in `pg.conf`).
+    *   Writes `primary_conninfo` to the replica's `postgresql.auto.conf`.
+    *   If the `<replica_node>` name contains "replica", `primary_slot_name = '<replica_node>_slot'` is also added to its `postgresql.auto.conf`.
+    *   Any other settings from `[postgresql.auto.conf.replica_node]` are also applied to the replica.
 
 *   **`start <node_name>`**
     *   Starts the PostgreSQL server for an initialized node.
@@ -96,9 +129,9 @@ Use `pg_script.py <command> --help` for detailed help on a specific command.
     *   Stops the PostgreSQL server for the specified node.
     *   Uses `pg_ctl stop -m fast`.
 
-*   **`restart <node_name>`**
-    *   Restarts the PostgreSQL server for the specified node.
-    *   Uses `pg_ctl restart -m fast`.
+*   **`status <node_name>`**
+    *   Checks and prints the running status of the PostgreSQL server for the specified node.
+    *   Uses `pg_ctl status`.
 
 *   **`cleanup <node_name>`**
     *   Resets a node: stops the server, completely removes its data directory, and then re-initializes a fresh cluster. Useful for starting over with a node.
@@ -113,7 +146,7 @@ Use `pg_script.py <command> --help` for detailed help on a specific command.
 *   These logs contain:
     *   Operations performed by `pg_script.py` itself.
     *   Output from PostgreSQL commands like `initdb`, `pg_ctl`.
-    *   PostgreSQL server logs when started by `pg_script.py start/restart` (due to `pg_ctl -l` option).
+    *   PostgreSQL server logs when started by `pg_script.py start` (due to the `-l` option passed to `pg_ctl start`).
 
 ## Output Indicators
 
@@ -123,37 +156,54 @@ The script uses visual indicators for operations:
 
 ## Example Workflow
 
-1.  **Configure `pg.conf`**: Set paths and define nodes `n1` (primary) and `n2` (replica).
+1.  **Configure `pg.conf`**: Create a `pg.conf` file (e.g., in your project root). Set paths and define nodes `n1` (primary) and `n2` (replica).
     ```ini
     [DEFAULT]
-    source_path = /path/to/postgres_sources
-    base_data_directory = /var/lib/pgdata
-    base_log_directory = /var/log/pglogs
-    base_bin_directory = /opt/pginstalls
+    source_path = ./pgsources             # e.g., download sources to project_root/pgsources/postgresql-17
+    base_data_directory = ./data/nodes    # Node data will be in ./data/nodes/n1, etc.
+    base_log_directory = ./logs           # Node logs will be in ./logs/n1.log, etc.
+    base_bin_directory = ./pginstalls     # Compiled PG will be in ./pginstalls/pgsql-17
+    pg_version = 17                       # Default version for nodes
 
     [n1]
     port = 5432
-    pg_version = 17
-    # Primary specific settings for replication in postgresql.auto.conf
-    pgsetting_wal_level = replica
-    pgsetting_max_wal_senders = 10
-    pgsetting_archive_mode = off # Or 'on' with archive_command for PITR
+    ip = 127.0.0.1
+    user = mypguser                       # Optional: user for admin tasks
 
-    [n2]
+    [postgresql.auto.conf.n1]
+    listen_addresses = '*'
+    wal_level = replica
+    max_wal_senders = 10
+    # Optional: for point-in-time recovery (PITR)
+    # archive_mode = on
+    # archive_command = 'cp %p /path/to/archive_dir/%f'
+
+    [n2] # This will be a replica
     port = 5433
-    pg_version = 17
+    ip = 127.0.0.1
+    user = mypguser
+
+    [postgresql.auto.conf.n2]
+    listen_addresses = '*'
+    hot_standby = on # Good practice for replicas
     ```
-2.  **Download PostgreSQL 17 source** to `/path/to/postgres_sources/postgresql-17.0` (or similar).
-3.  **Compile PostgreSQL 17** (if not already installed at `/opt/pginstalls/pgsql-17`):
-    `./pg_script.py compile n1 --pg 17`
+2.  **Download PostgreSQL 17 source** (if `pg_version = 17`) into the directory specified by `source_path` (e.g., `./pgsources/postgresql-17`).
+    Example: `mkdir -p ./pgsources && wget -O - https://ftp.postgresql.org/pub/source/v17.0/postgresql-17.0.tar.bz2 | tar -jx -C ./pgsources` (adjust version as needed).
+3.  **Compile PostgreSQL** (if not already installed at the location defined by `base_bin_directory` and `pg_version`):
+    `./scripts/pg_script.py compile n1 --pg 17`
+    *(This compiles PG version 17. The node `n1` is used for context like `source_path`)*
 4.  **Initialize Primary (n1):**
-    `./pg_script.py initdb n1`
+    `./scripts/pg_script.py initdb n1`
+    *(This creates the data directory, sets up `postgresql.auto.conf` from `[postgresql.auto.conf.n1]`, and configures `pg_hba.conf` for local trust and replication from `replicator` user.)*
 5.  **Start Primary (n1):**
-    `./pg_script.py start n1`
-    *(At this point, ensure primary's `pg_hba.conf` allows replication connections from replica's host for the replication user)*
-6.  **Initialize Replica (n2) - but as a replica, so we use the replica command:**
-    *(Ensure n2's data directory is empty or does not exist)*
-    `./pg_script.py replica n1 n2`
+    `./scripts/pg_script.py start n1`
+6.  **Set up Replica (n2):**
+    *(Ensure n2's data directory `./data/nodes/n2` is empty or does not exist. The script will create it.)*
+    `./scripts/pg_script.py replica n1 n2`
+    *(This uses `pg_basebackup` from primary `n1` to replica `n2`, creates `primary_conninfo` in `n2`'s `postgresql.auto.conf`, and applies settings from `[postgresql.auto.conf.n2]`.)*
 7.  **Start Replica (n2):**
-    `./pg_script.py start n2`
-8.  Check logs in `/var/log/pglogs/n1.log` and `/var/log/pglogs/n2.log`.
+    `./scripts/pg_script.py start n2`
+8.  **Check Status (Optional):**
+    `./scripts/pg_script.py status n1`
+    `./scripts/pg_script.py status n2`
+9.  Check logs in `./logs/n1.log` and `./logs/n2.log` (or as configured by `base_log_directory`).
