@@ -4,16 +4,16 @@ This directory contains scripts related to the [Spock](https://www.2ndquadrant.c
 
 ## Files
 
-- [`cross_nodes.py`](cross_nodes.py)  
+- [`cross_nodes.py`](cross_nodes.md)  
   A Python script for executing shell or SQL commands across multiple Spock nodes via SSH or direct connections. Useful for automation and cluster-wide diagnostics.
 
-- [`spock_cluster.py`](spock_cluster.py)  
+- [`spock_cluster.py`](spock_cluster.md)  
   A Python utility to initialize, configure, and manage a full Spock cluster. Supports adding nodes, setting up subscriptions, and orchestrating replication topologies.
 
-- [`zodan.py`](zodan.py)  
+- [`zodan.py`](zodan.md)  
   A Python script designed to simplify advanced cluster operations such as adding nodes with custom configurations, syncing replication slots, and zero-downtime workflows.
 
-- [`zodan.sql`](zodan.sql)  
+- [`zodan.sql`](zodan.md)  
   A comprehensive SQL-based workflow using `dblink` to add a new Spock node with zero downtime. Useful for PostgreSQL-native deployments without external tooling.
 
 ---
