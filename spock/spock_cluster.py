@@ -97,6 +97,26 @@ class SpockCluster:
             proc = subprocess.run(cmd, **kwargs)
         return proc.returncode == 0
 
+    # Helper: get postmaster PID from data directory
+    def _get_postmaster_pid(self, node_num: int) -> int | None:
+        try:
+            pid_path = Path(self.data_dir(node_num)) / "postmaster.pid"
+            if pid_path.exists():
+                with open(pid_path, "r") as f:
+                    first = f.readline().strip()
+                    if first.isdigit():
+                        return int(first)
+        except Exception:
+            pass
+        return None
+
+    # Helper: force kill postgresql if needed
+    def _kill_postgres(self, node_num: int, verbose: bool = False) -> bool:
+        pid = self._get_postmaster_pid(node_num)
+        if pid:
+            return self.run(["kill", "-9", str(pid)], verbose=verbose)
+        return False
+
     # ----- operations -----
     def is_running(self, node_num: int, verbose: bool = False) -> bool:
         data_dir = self.data_dir(node_num)
@@ -183,7 +203,14 @@ class SpockCluster:
         if not Path(data_dir).is_dir():
             self.logger.log(msg + "[SKIPPED]", verbose)
             return
+        # Try fast stop first
         result = self.run([f"{self.cfg.bin_dir}/pg_ctl", "-D", data_dir, "stop", "-m", "fast"], verbose=verbose)
+        if not result:
+            # Try immediate if fast failed
+            result = self.run([f"{self.cfg.bin_dir}/pg_ctl", "-D", data_dir, "stop", "-m", "immediate"], verbose=verbose)
+        # If still running, force kill
+        if not result and self.is_running(node_num, verbose=verbose):
+            result = self._kill_postgres(node_num, verbose=verbose)
         if result:
             self.logger.log(msg + "[OK]", verbose)
         else:
@@ -266,10 +293,20 @@ class SpockCluster:
             "fsync = off",
             "spock.exception_behaviour = 'sub_disable'",
             "client_min_messages = log",
+            # --- Enable PostgreSQL server logging to dataN/log ---
+            "log_destination = 'stderr'",
+            "logging_collector = on",
+            "log_directory = 'log'",
+            "log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'",
+            "log_truncate_on_rotation = on",
+            "log_rotation_age = 1d",
+            "log_rotation_size = 0",
         ]
         content = "\n".join(lines) + "\n"
         try:
             Path(data_dir).mkdir(parents=True, exist_ok=True)
+            # Ensure the log directory exists for logging_collector
+            Path(data_dir, "log").mkdir(parents=True, exist_ok=True)
             with open(auto_conf, "w") as f:
                 f.write(content)
             self.logger.log(msg + "[OK]", verbose)
