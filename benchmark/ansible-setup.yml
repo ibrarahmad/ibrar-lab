@@ -1,0 +1,375 @@
+---
+- name: Setup pgbalancer Benchmark Environment
+  hosts: localhost
+  become: yes
+  vars:
+    benchmark_dir: "/home/pgedge/pge/benchmark"
+    pgbalancer_dir: "/home/pgedge/pge/pgbalancer"
+    postgres_version: 13
+    
+  tasks:
+    - name: Install system dependencies
+      dnf:
+        name:
+          - postgresql{{ postgres_version }}
+          - postgresql{{ postgres_version }}-server
+          - postgresql{{ postgres_version }}-contrib
+          - python3-pip
+          - python3-devel
+          - gcc
+          - libyaml-devel
+          - memcached
+          - git
+          - vim
+          - pgbouncer
+          - pgpool-II
+          - rust
+          - cargo
+          - openssl-devel
+          - haproxy
+        state: present
+      tags: [deps, poolers]
+      ignore_errors: yes
+
+    - name: Install Python packages for benchmarking
+      pip:
+        name:
+          - asyncpg
+          - psycopg2-binary
+          - pyyaml
+          - tabulate
+          - requests
+        state: present
+      tags: [python]
+
+    - name: Install pgbench (included with PostgreSQL)
+      dnf:
+        name:
+          - postgresql{{ postgres_version }}-contrib
+        state: present
+      tags: [deps, benchmark_tools]
+      ignore_errors: yes
+
+    - name: Ensure PostgreSQL is initialized
+      stat:
+        path: /var/lib/pgsql/{{ postgres_version }}/data/PG_VERSION
+      register: pg_data
+      tags: [postgres]
+
+    - name: Initialize PostgreSQL
+      shell: |
+        /usr/pgsql-{{ postgres_version }}/bin/postgresql-{{ postgres_version }}-setup initdb
+      when: not pg_data.stat.exists
+      tags: [postgres]
+
+    - name: Configure PostgreSQL authentication
+      lineinfile:
+        path: /var/lib/pgsql/{{ postgres_version }}/data/pg_hba.conf
+        line: "host    all             all             127.0.0.1/32            trust"
+        insertafter: "# IPv4 local connections"
+      notify: restart postgresql
+      tags: [postgres]
+
+    - name: Enable and start PostgreSQL
+      systemd:
+        name: postgresql-{{ postgres_version }}
+        enabled: yes
+        state: started
+      tags: [postgres]
+
+    - name: Create benchmark database
+      postgresql_db:
+        name: benchmark
+        state: present
+      become_user: postgres
+      tags: [postgres]
+
+    - name: Build pgbalancer
+      shell: |
+        cd {{ pgbalancer_dir }}
+        make clean
+        make -j4
+      tags: [build]
+
+    - name: Create pgbalancer config directory
+      file:
+        path: /usr/local/etc
+        state: directory
+        mode: '0755'
+      tags: [config]
+
+    - name: Copy pgbalancer YAML config
+      copy:
+        src: "{{ benchmark_dir }}/conf/pgbalancer.yaml"
+        dest: /usr/local/etc/pgbalancer.yaml
+        mode: '0644'
+      tags: [config]
+
+    - name: Copy pool_passwd file
+      copy:
+        src: "{{ benchmark_dir }}/conf/pool_passwd"
+        dest: /usr/local/etc/pool_passwd
+        mode: '0600'
+      tags: [config]
+
+    - name: Configure pgbouncer
+      copy:
+        src: "{{ benchmark_dir }}/conf/pgbouncer.ini"
+        dest: /etc/pgbouncer/pgbouncer.ini
+        mode: '0644'
+      tags: [config, poolers]
+      ignore_errors: yes
+
+    - name: Create pgbouncer userlist
+      copy:
+        content: |
+          "postgres" ""
+        dest: /etc/pgbouncer/userlist.txt
+        mode: '0644'
+      tags: [config, poolers]
+      ignore_errors: yes
+
+    - name: Configure pgpool2
+      copy:
+        src: "{{ benchmark_dir }}/conf/pgpool2.conf"
+        dest: /etc/pgpool-II/pgpool.conf
+        mode: '0644'
+      tags: [config, poolers]
+      ignore_errors: yes
+
+    - name: Configure HAProxy for PostgreSQL
+      copy:
+        content: |
+          global
+              log /dev/log local0
+              log /dev/log local1 notice
+              chroot /var/lib/haproxy
+              stats socket /run/haproxy/admin.sock mode 660 level admin
+              stats timeout 30s
+              user haproxy
+              group haproxy
+              daemon
+          
+          defaults
+              log global
+              mode tcp
+              option tcplog
+              option dontlognull
+              timeout connect 10s
+              timeout client 1h
+              timeout server 1h
+          
+          frontend postgres_frontend
+              bind *:9995
+              default_backend postgres_backend
+          
+          backend postgres_backend
+              balance roundrobin
+              option tcp-check
+              server postgres1 localhost:5432 check
+          
+          listen stats
+              bind *:8404
+              mode http
+              stats enable
+              stats uri /stats
+              stats refresh 30s
+              stats show-legends
+              stats show-node
+        dest: /etc/haproxy/haproxy.cfg
+        mode: '0644'
+      tags: [config, poolers]
+      ignore_errors: yes
+
+    - name: Create HAProxy directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /var/lib/haproxy
+        - /run/haproxy
+      tags: [dirs, poolers]
+      ignore_errors: yes
+
+    - name: Create benchmark directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ benchmark_dir }}/log"
+        - "{{ benchmark_dir }}/results"
+        - /tmp/benchmark
+        - /etc/pgbouncer
+        - /etc/pgpool-II
+        - /tmp/pgcat
+        - "{{ benchmark_dir }}/hammerdb"
+      tags: [dirs]
+
+    - name: Clone pgcat repository
+      git:
+        repo: https://github.com/postgresml/pgcat.git
+        dest: /tmp/pgcat
+        version: main
+        update: no
+      tags: [pgcat, poolers]
+      ignore_errors: yes
+
+    - name: Build pgcat
+      shell: |
+        cd /tmp/pgcat
+        cargo build --release
+      tags: [pgcat, poolers]
+      ignore_errors: yes
+      async: 300
+      poll: 10
+
+    - name: Create pgcat configuration
+      copy:
+        content: |
+          [general]
+          host = "0.0.0.0"
+          port = 9996
+          admin_username = "admin"
+          admin_password = "admin"
+          server_lifetime = 86400
+          idle_timeout = 30000
+          connect_timeout = 5000
+          log_level = "info"
+          
+          [pools.postgres]
+          pool_mode = "transaction"
+          default_role = "any"
+          query_parser_enabled = true
+          primary_reads_enabled = true
+          sharding_function = "pg_bigint_hash"
+          
+          [pools.postgres.users.0]
+          username = "postgres"
+          password = ""
+          pool_size = 20
+          
+          [pools.postgres.shards.0]
+          servers = [
+            ["localhost", 5432, "primary"]
+          ]
+          database = "postgres"
+        dest: /tmp/pgcat/pgcat.toml
+        mode: '0644'
+      tags: [pgcat, poolers]
+      ignore_errors: yes
+
+    - name: Install sysbench (optional for TPC-C)
+      shell: |
+        if ! command -v sysbench &> /dev/null; then
+          curl -s https://packagecloud.io/install/repositories/akopytov/sysbench/script.rpm.sh | bash
+          dnf install -y sysbench
+        fi
+      tags: [sysbench, optional]
+      ignore_errors: yes
+
+    - name: Install Java (required for HammerDB)
+      dnf:
+        name:
+          - java-11-openjdk
+          - java-11-openjdk-devel
+        state: present
+      tags: [hammerdb, benchmark_tools]
+      ignore_errors: yes
+
+    - name: Download HammerDB
+      get_url:
+        url: https://github.com/TPC-Council/HammerDB/releases/download/v4.9/HammerDB-4.9-Linux.tar.gz
+        dest: /tmp/hammerdb.tar.gz
+        mode: '0644'
+      tags: [hammerdb, benchmark_tools]
+      ignore_errors: yes
+
+    - name: Extract HammerDB
+      unarchive:
+        src: /tmp/hammerdb.tar.gz
+        dest: /opt/
+        remote_src: yes
+        creates: /opt/HammerDB-4.9
+      tags: [hammerdb, benchmark_tools]
+      ignore_errors: yes
+
+    - name: Create HammerDB symlink
+      file:
+        src: /opt/HammerDB-4.9/hammerdbcli
+        dest: /usr/local/bin/hammerdbcli
+        state: link
+      tags: [hammerdb, benchmark_tools]
+      ignore_errors: yes
+
+    - name: Create HammerDB config directory
+      file:
+        path: "{{ benchmark_dir }}/hammerdb"
+        state: directory
+        mode: '0755'
+      tags: [hammerdb, benchmark_tools]
+
+    - name: Check pgbalancer build
+      stat:
+        path: "{{ pgbalancer_dir }}/src/pgbalancer"
+      register: pgbalancer_bin
+      tags: [verify]
+
+    - name: Check pgbouncer installation
+      command: which pgbouncer
+      register: pgbouncer_bin
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: Check pgpool2 installation
+      command: which pgpool
+      register: pgpool_bin
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: Display setup status
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════╗
+          ║   Multi-Pooler Benchmark Setup Complete!                ║
+          ╚══════════════════════════════════════════════════════════╝
+          
+          ✓ PostgreSQL: Running on port 5432
+          ✓ pgbalancer: {{ pgbalancer_dir }}/src/pgbalancer
+          ✓ pgbouncer: {{ 'Installed' if pgbouncer_bin.rc == 0 else 'Not installed' }}
+          ✓ pgpool2: {{ 'Installed' if pgpool_bin.rc == 0 else 'Not installed' }}
+          
+          Configurations:
+          - pgbalancer: /usr/local/etc/pgbalancer.yaml
+          - pgbouncer: /etc/pgbouncer/pgbouncer.ini
+          - pgpool2: /etc/pgpool-II/pgpool.conf
+          
+          Benchmark: {{ benchmark_dir }}
+          
+          ╔══════════════════════════════════════════════════════════╗
+          ║   Next Steps                                             ║
+          ╚══════════════════════════════════════════════════════════╝
+          
+          1. Run full benchmark (all poolers):
+             cd {{ benchmark_dir }}
+             ./run-with-ansible.sh --full-benchmark --poolers pgbalancer pgbouncer pgpool2
+          
+          2. Compare poolers:
+             ./run-with-ansible.sh --run-benchmark --poolers pgbalancer pgbouncer --duration 120
+          
+          3. Verify setup:
+             ./verify-setup.sh
+          
+          4. View pgbalancer config:
+             ../pgbalancer/src/pgbalancer --show-config -f conf/pgbalancer.yaml
+      tags: [verify]
+
+  handlers:
+    - name: restart postgresql
+      systemd:
+        name: postgresql-{{ postgres_version }}
+        state: restarted
+

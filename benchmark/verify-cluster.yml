@@ -1,0 +1,55 @@
+---
+- name: Verify pgbalancer Cluster Status
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  
+  tasks:
+    - name: Check if PostgreSQL is running
+      command: pg_isready -h localhost -p 5432
+      register: pg_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check if pgbalancer process is running
+      shell: pgrep -x pgbalancer
+      register: pgbalancer_process
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check if pgbalancer is listening on port 9999
+      shell: ss -tlnp | grep :9999
+      register: pgbalancer_port
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Test connection to pgbalancer
+      command: psql -h localhost -p 9999 -U postgres -d postgres -c "SELECT 1;"
+      register: pgbalancer_test
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check pool nodes status
+      command: psql -h localhost -p 9999 -U postgres -d postgres -c "SHOW pool_nodes;"
+      register: pool_nodes
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display cluster status
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════╗
+          ║   pgbalancer Cluster Status                              ║
+          ╚══════════════════════════════════════════════════════════╝
+          
+          PostgreSQL: {{ 'RUNNING ✓' if pg_status.rc == 0 else 'NOT RUNNING ✗' }}
+          pgbalancer Process: {{ 'RUNNING ✓' if pgbalancer_process.rc == 0 else 'NOT RUNNING ✗' }}
+          pgbalancer Port 9999: {{ 'LISTENING ✓' if pgbalancer_port.rc == 0 else 'NOT LISTENING ✗' }}
+          Connection Test: {{ 'SUCCESS ✓' if pgbalancer_test.rc == 0 else 'FAILED ✗' }}
+          
+          {% if pool_nodes.rc == 0 %}
+          Pool Nodes:
+          {{ pool_nodes.stdout }}
+          {% endif %}
+          
+          Status: {% if pg_status.rc == 0 and pgbalancer_process.rc == 0 and pgbalancer_test.rc == 0 %}READY FOR BENCHMARKING ✓{% else %}SETUP REQUIRED ✗{% endif %}

@@ -1,0 +1,38 @@
+TPC-C BENCHMARK RESULTS
+================================================================================
+
+PGBALANCER:
+  tps: 1250.50
+  qps: 6250.25
+  avg: 12.80ms
+  p95: 25.60ms
+  p99: 45.20ms
+  errors: 0
+  reconnects: 0
+  memory: 45.20MB
+  cpu: 15.30%
+
+PGBOUNCER:
+  tps: 1180.75
+  qps: 5903.75
+  avg: 13.50ms
+  p95: 27.00ms
+  p99: 48.50ms
+  errors: 0
+  reconnects: 0
+  memory: 12.80MB
+  cpu: 12.40%
+
+PGPOOL2:
+  tps: 1100.25
+  qps: 5501.25
+  avg: 14.50ms
+  p95: 29.00ms
+  p99: 52.30ms
+  errors: 0
+  reconnects: 0
+  memory: 38.50MB
+  cpu: 14.20%
+
+Detailed report saved to: /tmp/tpcc_benchmark/tpcc_benchmark_report.json
+================================================================================

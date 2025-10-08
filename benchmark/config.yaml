@@ -1,0 +1,51 @@
+# Benchmark Configuration
+# =======================
+
+# Benchmark type (tpcc, tpcb, tpch)
+benchmark_type: tpcc
+
+# Directories
+work_dir: "/tmp/benchmark"
+postgres_data_dir: "/tmp/pgdata"
+sysbench_dir: "/tmp/sysbench"
+
+# PostgreSQL settings
+postgres_port: 5432
+postgres_user: "postgres"
+postgres_password: ""
+postgres_database: "benchmark"
+
+# Pooler configurations
+poolers:
+  pgpool2:
+    enabled: false
+    port: 9999
+    config_file: "pgpool2.conf"
+    
+  pgbalancer:
+    enabled: true
+    port: 9998
+    config_file: "pgbalancer.yaml"
+    
+  pgbouncer:
+    enabled: false
+    port: 9997
+    config_file: "pgbouncer.ini"
+    
+  pgcat:
+    enabled: false  # Disabled by default (requires Rust)
+    port: 9996
+    config_file: "pgcat.toml"
+
+# Benchmark settings
+warehouses: 10
+scale_factor: 1.0
+threads: 16
+time: 60
+report_interval: 10
+
+# Sysbench specific settings
+percentile: 95
+histogram: true
+rand_init: true
+trx: "all"

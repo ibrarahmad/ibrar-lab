@@ -1,0 +1,58 @@
+# PostgreSQL Pooler Benchmark Configuration
+# ==========================================
+
+# Test parameters
+test_duration: 30          # seconds
+max_connections: 20        # concurrent connections
+connection_timeout: 30     # seconds
+command_timeout: 30        # seconds
+
+# PostgreSQL backend configuration
+postgresql:
+  host: localhost
+  port: 5432
+  database: postgres
+  user: postgres
+  password: ""
+
+# Pooler configurations
+poolers:
+  pgpool2:
+    enabled: true
+    port: 9999
+    config_file: /tmp/pgpool2.conf
+    
+  pgbalancer:
+    enabled: true
+    port: 9998
+    config_file: /tmp/pgbalancer_bench.yaml
+    
+  pgbouncer:
+    enabled: true
+    port: 9997
+    config_file: /tmp/pgbouncer.ini
+    
+  pgcat:
+    enabled: true
+    port: 9996
+    config_file: /tmp/pgcat.toml
+
+# Test scenarios
+tests:
+  single_query:
+    enabled: true
+    description: "Simple SELECT 1 queries"
+    
+  concurrent_connections:
+    enabled: true
+    description: "Multiple concurrent connections with sleep"
+    
+  load_balancing:
+    enabled: true
+    description: "Load balancing across multiple backends"
+
+# Output configuration
+output:
+  json_report: benchmark_report.json
+  csv_report: benchmark_results.csv
+  detailed_logs: true

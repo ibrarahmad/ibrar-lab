@@ -1,0 +1,78 @@
+# pgbalancer configuration for benchmark
+# Proper nested YAML structure
+
+# Network configuration
+network:
+  listen_addresses: 'localhost'
+  port: 9998
+  socket_dir: '/tmp'
+
+# Connection pool settings
+connection_pool:
+  num_init_children: 32
+  max_connections: 100
+  child_life_time: 300
+  child_max_connections: 0
+  connection_life_time: 0
+  client_idle_limit: 0
+
+# Authentication settings
+authentication:
+  timeout: 60
+  ssl: false
+
+# Logging configuration
+logging:
+  destination: 'stderr'
+  directory: '/home/pgedge/pge/pgbalancer/benchmark/log'
+  filename: 'pgbalancer.log'
+  min_messages: 'notice'
+  line_prefix: '%t [%p]: [%l-1] user=%u,db=%d,client=%h '
+
+# Health check settings
+health_check:
+  period: 30
+  timeout: 20
+  user: 'postgres'
+  password: 'postgres'
+  database: 'postgres'
+
+# Failover configuration
+failover:
+  on_backend_error: true
+  command: ''
+
+# Load balancing
+load_balance:
+  mode: true
+  ignore_leading_white_space: true
+
+# Connection pooling
+connection_cache:
+  enabled: true
+  reset_query_list: 'ABORT; DISCARD ALL'
+
+# Memory query cache
+memory_query_cache:
+  enabled: false
+  max_num_cache: 0
+  maxcache: 33554432
+  cache_hit_ratio: 0.0
+  auto_cache_creation: false
+  enable_query_cache: false
+  query_cache_strip_comments: false
+
+# System settings
+system:
+  relcache_expire: 0
+  relcache_size: 256
+  check_temp_table: false
+  check_unlogged_table: false
+
+# Backend configuration - this is the key part that needs proper parsing
+backends:
+  - hostname: 'localhost'
+    port: 5432
+    weight: 1
+    data_directory: '/var/lib/pgsql/data'
+    flag: 'ALLOW_TO_FAILOVER'
