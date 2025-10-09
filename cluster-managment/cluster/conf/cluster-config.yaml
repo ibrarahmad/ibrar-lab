@@ -1,0 +1,55 @@
+# PostgreSQL Cluster Configuration
+# ================================
+
+# Cluster Settings
+cluster:
+  name: production
+  version: 17
+  
+# Node Configuration
+nodes:
+  primary:
+    host: localhost
+    port: 5432
+  
+  replicas:
+    - host: localhost
+      port: 5433
+      name: replica1
+    - host: localhost
+      port: 5434
+      name: replica2
+
+# Replication Settings
+replication:
+  user: replicator
+  password: replpass
+  synchronous: true
+  synchronous_mode: "FIRST 2"  # Wait for 2 replicas
+  wal_keep_size: "1GB"
+  max_wal_senders: 10
+  max_replication_slots: 10
+
+# Connection Settings
+connection:
+  max_connections: 200
+  shared_buffers: "256MB"
+  effective_cache_size: "1GB"
+  work_mem: "16MB"
+  maintenance_work_mem: "128MB"
+
+# Pooler Ports
+poolers:
+  pgbalancer: 9999
+  pgbouncer: 9997
+  pgpool2: 9998
+  pgcat: 9996
+
+# Paths (OS-specific, auto-detected if not set)
+paths:
+  # Leave empty for auto-detection based on OS
+  pg_bin: ""
+  pg_data: ""
+  pg_config: ""
+  log_dir: "./log"
+

@@ -1,0 +1,71 @@
+# Benchmark Suite Configuration
+# =============================
+
+# PostgreSQL Connection
+postgres:
+  host: localhost
+  port: 5432
+  user: postgres
+  password: ""
+  database: benchmark
+
+# Replica Ports (if testing with replicas)
+replicas:
+  enabled: false
+  ports: [5433, 5434]
+
+# Benchmark Settings
+benchmark:
+  type: pgbench           # pgbench (built-in), tpcc, tpch
+  duration: 60            # seconds
+  threads: 4              # clients
+  scale: 10               # scale factor
+
+# pgbench Settings
+pgbench:
+  protocol: simple        # simple, extended, prepared
+  select_only: false
+  skip_vacuum: false
+  report_latencies: true
+
+# HammerDB Settings (optional - for TPC-C/TPC-H)
+hammerdb:
+  version: "4.11"
+  enabled: false
+
+# Pooler Configuration
+poolers:
+  pgbalancer:
+    enabled: true
+    port: 9999
+    config_file: pgbalancer.yaml
+    
+  pgbouncer:
+    enabled: true
+    port: 9997
+    config_file: pgbouncer.ini
+    
+  pgpool2:
+    enabled: true
+    port: 9998
+    config_file: pgpool2.conf
+    
+  pgcat:
+    enabled: false
+    port: 9996
+    config_file: pgcat.toml
+
+# Directories (relative to script or absolute)
+directories:
+  work_dir: ~/.benchmark
+  hammerdb_dir: ~/.hammerdb
+  log_dir: ../log
+  results_dir: ../results
+
+# Report Settings
+report:
+  format: json            # json, csv, html
+  detailed: true
+  include_charts: false
+  export_to_file: true
+

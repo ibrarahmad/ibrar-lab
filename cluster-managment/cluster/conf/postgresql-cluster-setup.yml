@@ -1,0 +1,300 @@
+---
+- name: Setup 3-Node PostgreSQL Cluster (1 Primary + 2 Synchronous Replicas)
+  hosts: all
+  become: yes
+  vars:
+    postgres_version: "{{ pg_version | default('17') }}"
+    postgres_port: "{{ pg_port | default(5432) }}"
+    cluster_name: "{{ pg_cluster_name | default('main') }}"
+    replication_user: "{{ pg_repl_user | default('replicator') }}"
+    replication_password: "{{ pg_repl_password | default('replpass') }}"
+    
+  tasks:
+    ##############################################################################
+    # INSTALL POSTGRESQL
+    ##############################################################################
+    - name: Install PostgreSQL repository (RHEL/Rocky)
+      dnf:
+        name: "https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+        state: present
+        disable_gpg_check: yes
+      when: ansible_os_family == "RedHat"
+      tags: [install]
+      
+    - name: Install PostgreSQL packages (RHEL/Rocky)
+      dnf:
+        name:
+          - "postgresql{{ postgres_version }}"
+          - "postgresql{{ postgres_version }}-server"
+          - "postgresql{{ postgres_version }}-contrib"
+          - "postgresql{{ postgres_version }}-devel"
+          - python3-psycopg2
+        state: present
+      when: ansible_os_family == "RedHat"
+      tags: [install]
+      
+    - name: Install PostgreSQL packages (Debian/Ubuntu)
+      apt:
+        name:
+          - "postgresql-{{ postgres_version }}"
+          - "postgresql-contrib-{{ postgres_version }}"
+          - "postgresql-server-dev-{{ postgres_version }}"
+          - python3-psycopg2
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+      tags: [install]
+
+    ##############################################################################
+    # PRIMARY NODE SETUP
+    ##############################################################################
+    - block:
+        - name: Check if PostgreSQL data directory exists
+          stat:
+            path: "/var/lib/pgsql/{{ postgres_version }}/data/PG_VERSION"
+          register: pg_data_check
+          
+        - name: Initialize PostgreSQL database (RHEL/Rocky)
+          command: "/usr/pgsql-{{ postgres_version }}/bin/postgresql-{{ postgres_version }}-setup initdb"
+          when: 
+            - ansible_os_family == "RedHat"
+            - not pg_data_check.stat.exists
+            
+        - name: Initialize PostgreSQL database (Debian/Ubuntu)
+          command: "/usr/lib/postgresql/{{ postgres_version }}/bin/initdb -D /var/lib/postgresql/{{ postgres_version }}/main"
+          become_user: postgres
+          when:
+            - ansible_os_family == "Debian"
+            - not pg_data_check.stat.exists
+            
+        - name: Configure PostgreSQL for synchronous replication
+          lineinfile:
+            path: "/var/lib/pgsql/{{ postgres_version }}/data/postgresql.conf"
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+            backup: yes
+          loop:
+            - { regexp: '^#?listen_addresses', line: "listen_addresses = '*'" }
+            - { regexp: '^#?port', line: "port = {{ postgres_port }}" }
+            - { regexp: '^#?wal_level', line: "wal_level = replica" }
+            - { regexp: '^#?max_wal_senders', line: "max_wal_senders = 10" }
+            - { regexp: '^#?max_replication_slots', line: "max_replication_slots = 10" }
+            - { regexp: '^#?hot_standby', line: "hot_standby = on" }
+            - { regexp: '^#?wal_keep_size', line: "wal_keep_size = 1GB" }
+            - { regexp: '^#?synchronous_commit', line: "synchronous_commit = on" }
+            - { regexp: '^#?synchronous_standby_names', line: "synchronous_standby_names = 'FIRST 2 (replica1, replica2)'" }
+          notify: restart postgresql
+          
+        - name: Configure pg_hba.conf for replication
+          blockinfile:
+            path: "/var/lib/pgsql/{{ postgres_version }}/data/pg_hba.conf"
+            block: |
+              # IPv4 local connections
+              host    all             all             127.0.0.1/32            trust
+              host    all             all             0.0.0.0/0               md5
+              
+              # Replication connections
+              host    replication     {{ replication_user }}     0.0.0.0/0      md5
+            backup: yes
+          notify: restart postgresql
+          
+        - name: Enable and start PostgreSQL
+          systemd:
+            name: "postgresql-{{ postgres_version }}"
+            enabled: yes
+            state: started
+            
+        - name: Wait for PostgreSQL to be ready
+          wait_for:
+            port: "{{ postgres_port }}"
+            delay: 5
+            timeout: 30
+            
+        - name: Create replication user
+          postgresql_user:
+            name: "{{ replication_user }}"
+            password: "{{ replication_password }}"
+            role_attr_flags: REPLICATION,LOGIN
+          become_user: postgres
+          
+        - name: Create replication slot for replica1
+          postgresql_query:
+            db: postgres
+            query: "SELECT pg_create_physical_replication_slot('replica1_slot') WHERE NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'replica1_slot')"
+          become_user: postgres
+          
+        - name: Create replication slot for replica2
+          postgresql_query:
+            db: postgres
+            query: "SELECT pg_create_physical_replication_slot('replica2_slot') WHERE NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'replica2_slot')"
+          become_user: postgres
+          
+      when: "'primary' in group_names"
+      tags: [primary]
+
+    ##############################################################################
+    # REPLICA NODE SETUP (2 Replicas)
+    ##############################################################################
+    - block:
+        - name: Stop PostgreSQL on replica
+          systemd:
+            name: "postgresql-{{ postgres_version }}"
+            state: stopped
+          ignore_errors: yes
+            
+        - name: Remove existing data directory
+          file:
+            path: "/var/lib/pgsql/{{ postgres_version }}/data"
+            state: absent
+            
+        - name: Create data directory
+          file:
+            path: "/var/lib/pgsql/{{ postgres_version }}/data"
+            state: directory
+            owner: postgres
+            group: postgres
+            mode: '0700'
+            
+        - name: Determine replica name
+          set_fact:
+            replica_name: "{{ 'replica1' if inventory_hostname == groups['replicas'][0] else 'replica2' }}"
+            
+        - name: Run pg_basebackup from primary
+          command: >
+            /usr/pgsql-{{ postgres_version }}/bin/pg_basebackup
+            -h {{ hostvars[groups['primary'][0]]['ansible_host'] }}
+            -p {{ postgres_port }}
+            -U {{ replication_user }}
+            -D /var/lib/pgsql/{{ postgres_version }}/data
+            -Fp -Xs -P -R
+            -S {{ replica_name }}_slot
+          become_user: postgres
+          environment:
+            PGPASSWORD: "{{ replication_password }}"
+            
+        - name: Configure recovery settings in postgresql.auto.conf
+          lineinfile:
+            path: "/var/lib/pgsql/{{ postgres_version }}/data/postgresql.auto.conf"
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+            create: yes
+            owner: postgres
+            group: postgres
+          loop:
+            - { regexp: '^primary_conninfo', line: "primary_conninfo = 'host={{ hostvars[groups['primary'][0]]['ansible_host'] }} port={{ postgres_port }} user={{ replication_user }} password={{ replication_password }} application_name={{ replica_name }}'" }
+            - { regexp: '^primary_slot_name', line: "primary_slot_name = '{{ replica_name }}_slot'" }
+            
+        - name: Start PostgreSQL on replica
+          systemd:
+            name: "postgresql-{{ postgres_version }}"
+            enabled: yes
+            state: started
+            
+      when: "'replicas' in group_names"
+      tags: [replica]
+
+    ##############################################################################
+    # VERIFICATION
+    ##############################################################################
+    - name: Wait for PostgreSQL to be ready
+      wait_for:
+        port: "{{ postgres_port }}"
+        host: "{{ ansible_host }}"
+        delay: 5
+        timeout: 30
+      tags: [verify]
+      
+    - name: Check synchronous replication status on primary
+      postgresql_query:
+        db: postgres
+        query: |
+          SELECT 
+            application_name, 
+            client_addr, 
+            state, 
+            sync_state, 
+            sync_priority,
+            pg_wal_lsn_diff(pg_current_wal_lsn(), sent_lsn) AS send_lag_bytes,
+            pg_wal_lsn_diff(sent_lsn, flush_lsn) AS flush_lag_bytes
+          FROM pg_stat_replication
+          ORDER BY sync_priority;
+      become_user: postgres
+      when: "'primary' in group_names"
+      register: replication_status
+      tags: [verify]
+      
+    - name: Display synchronous replication status
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║        Synchronous Replication Status                     ║
+          ╠═══════════════════════════════════════════════════════════╣
+          {{ replication_status.query_result | to_nice_yaml }}
+          ╚═══════════════════════════════════════════════════════════╝
+      when: 
+        - "'primary' in group_names"
+        - replication_status.query_result is defined
+      tags: [verify]
+      
+    - name: Check replica lag
+      postgresql_query:
+        db: postgres
+        query: |
+          SELECT 
+            pg_is_in_recovery() AS is_replica,
+            pg_last_wal_receive_lsn() AS receive_lsn,
+            pg_last_wal_replay_lsn() AS replay_lsn,
+            pg_last_xact_replay_timestamp() AS last_replay_time,
+            EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) AS replay_lag_seconds
+      become_user: postgres
+      when: "'replicas' in group_names"
+      register: replica_lag
+      tags: [verify]
+      
+    - name: Display replica status
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║        Replica Status                                     ║
+          ╠═══════════════════════════════════════════════════════════╣
+          {{ replica_lag.query_result | to_nice_yaml }}
+          ╚═══════════════════════════════════════════════════════════╝
+      when: 
+        - "'replicas' in group_names"
+        - replica_lag.query_result is defined
+      tags: [verify]
+      
+    - name: Display cluster summary
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════════╗
+          ║   PostgreSQL 3-Node Synchronous Cluster Setup Complete   ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║                                                            ║
+          ║  ✓ Primary: {{ hostvars[groups['primary'][0]]['ansible_host'] }}:{{ postgres_port }}                      ║
+          ║  ✓ Replica1: {{ hostvars[groups['replicas'][0]]['ansible_host'] if groups['replicas'] | length > 0 else 'N/A' }}:{{ postgres_port }}                     ║
+          ║  ✓ Replica2: {{ hostvars[groups['replicas'][1]]['ansible_host'] if groups['replicas'] | length > 1 else 'N/A' }}:{{ postgres_port }}                     ║
+          ║                                                            ║
+          ║  Synchronous Replication: FIRST 2 replicas                ║
+          ║  - Both replicas must confirm before commit              ║
+          ║  - Zero data loss protection                             ║
+          ║  - Automatic failover ready                              ║
+          ║                                                            ║
+          ╠═══════════════════════════════════════════════════════════╣
+          ║  Verify Setup:                                            ║
+          ║  $ psql -h {{ hostvars[groups['primary'][0]]['ansible_host'] }} -p {{ postgres_port }} -U postgres      ║
+          ║  postgres=# SELECT * FROM pg_stat_replication;            ║
+          ║                                                            ║
+          ║  Check Sync Status:                                       ║
+          ║  postgres=# SELECT application_name, sync_state           ║
+          ║             FROM pg_stat_replication;                     ║
+          ║                                                            ║
+          ╚═══════════════════════════════════════════════════════════╝
+      when: "'primary' in group_names"
+      tags: [verify]
+
+  handlers:
+    - name: restart postgresql
+      systemd:
+        name: "postgresql-{{ postgres_version }}"
+        state: restarted

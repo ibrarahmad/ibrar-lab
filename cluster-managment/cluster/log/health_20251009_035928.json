@@ -1,0 +1,14 @@
+{
+  "timestamp": "2025-10-09T03:59:28.343474",
+  "postgres": {
+    "port_5432": true,
+    "port_5433": false,
+    "port_5434": false
+  },
+  "poolers": {
+    "pgbalancer": true,
+    "pgbouncer": false,
+    "pgpool2": false,
+    "pgcat": false
+  }
+}
