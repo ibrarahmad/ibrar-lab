@@ -11,14 +11,40 @@ nodes:
   primary:
     host: localhost
     port: 5432
+    
+    # Primary-specific PostgreSQL settings (override global)
+    postgresql:
+      # Add any primary-specific settings here
+      # Example: log_statement: 'all'
+    
+    # Primary-specific pg_hba entries (in addition to global)
+    pg_hba:
+      # Example: - "host all admin 10.0.0.0/8 md5"
   
   replicas:
     - host: localhost
       port: 5433
       name: replica1
+      
+      # Replica1-specific PostgreSQL settings
+      postgresql:
+        # Add any replica1-specific settings here
+      
+      # Replica1-specific pg_hba entries
+      pg_hba:
+        # Add any replica1-specific entries here
+    
     - host: localhost
       port: 5434
       name: replica2
+      
+      # Replica2-specific PostgreSQL settings
+      postgresql:
+        # Add any replica2-specific settings here
+      
+      # Replica2-specific pg_hba entries
+      pg_hba:
+        # Add any replica2-specific entries here
 
 # Replication Settings
 replication:
@@ -38,12 +64,69 @@ connection:
   work_mem: "16MB"
   maintenance_work_mem: "128MB"
 
-# Pooler Ports
+# Pooler Configuration
 poolers:
-  pgbalancer: 9999
-  pgbouncer: 9997
-  pgpool2: 9998
-  pgcat: 9996
+  pgbalancer:
+    enabled: true
+    port: 9999
+    bin_path: ""  # Auto-detect if empty
+    config_file: ""  # Auto-detect if empty
+    log_file: "log/pgbalancer.log"
+    options: "-n"  # Non-daemon mode
+  
+  pgbouncer:
+    enabled: false
+    port: 9997
+    bin_path: ""  # Auto-detect (pgbouncer in PATH)
+    config_file: ""  # Auto-detect or default
+    log_file: "log/pgbouncer.log"
+    options: "-d"  # Daemon mode
+  
+  pgpool2:
+    enabled: false
+    port: 9998
+    bin_path: ""  # Auto-detect (pgpool in PATH)
+    config_file: ""  # Auto-detect or default
+    log_file: "log/pgpool2.log"
+    options: "-n -D"  # Non-daemon, discard status
+  
+  pgcat:
+    enabled: false
+    port: 9996
+    bin_path: ""  # Auto-detect (pgcat in PATH)
+    config_file: ""  # Auto-detect or default
+    log_file: "log/pgcat.log"
+    options: ""
+  
+  haproxy:
+    enabled: false
+    port: 9995
+    bin_path: ""  # Auto-detect (haproxy in PATH)
+    config_file: ""  # Auto-detect or default
+    log_file: "log/haproxy.log"
+    options: "-f"  # Config file flag
+
+# PostgreSQL Configuration (postgresql.conf settings)
+postgresql:
+  # Initialization
+  encoding: "UTF8"
+  locale: "C"
+  
+  # Network
+  listen_addresses: "*"
+  
+  # WAL & Replication  
+  wal_level: "replica"
+  hot_standby: "on"
+  
+# Authentication (pg_hba.conf entries)
+pg_hba:
+  # Format: type database user address method
+  entries:
+    - "host all all 127.0.0.1/32 trust"
+    - "host all all ::1/128 trust"
+    - "host replication {repl_user} 127.0.0.1/32 trust"
+    - "host replication {repl_user} ::1/128 trust"
 
 # Paths (OS-specific, auto-detected if not set)
 paths:

@@ -332,11 +332,12 @@ class SpockCluster:
             "log_destination = 'stderr'",
             "logging_collector = on",
             "log_directory = 'log'",
-            "log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'",
+            "log_filename = 'postgres.log'",
             "log_truncate_on_rotation = on",
             "log_rotation_age = 1d",
             "log_rotation_size = 0",
         ]
+        # Note: synchronized_standby_slots only needed when physical standbys exist
         if replica_mode and self.has_spock():
             lines += [
                 f"synchronous_standby_names = 'FIRST 1 (n{node_num}r)'",
@@ -535,9 +536,11 @@ class SpockCluster:
             "log_destination = 'stderr'",
             "logging_collector = on",
             "log_directory = 'log'",
-            "log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'",
+            "log_filename = 'postgres.log'",
+            "shared_preload_libraries = 'spock'",
+            "sync_replication_slots = on",  # PostgreSQL 17 native failover slot feature
         ]
-        # DO NOT include spock shared_preload_libraries for physical replicas
+        # Use PostgreSQL 17 native failover slot synchronization instead of custom spock worker
         with open(recovery_conf, "w") as f:
             f.write("\n".join(replica_config_lines) + "\n")
         self.logger.log(msg + "[OK]", verbose)
