@@ -69,24 +69,24 @@ poolers:
   pgbalancer:
     enabled: true
     port: 9999
-    bin_path: ""  # Auto-detect if empty
-    config_file: ""  # Auto-detect if empty
+    bin_path: "/Users/pgedge/pge/pgbalancer/build/bin/pgbalancer"
+    config_file: "/Users/pgedge/pge/ibrar-lab/cluster-managment/cluster/conf/pgbalancer.conf"
     log_file: "log/pgbalancer.log"
     options: "-n"  # Non-daemon mode
   
   pgbouncer:
-    enabled: false
+    enabled: true
     port: 9997
-    bin_path: ""  # Auto-detect (pgbouncer in PATH)
-    config_file: ""  # Auto-detect or default
+    bin_path: "/opt/homebrew/bin/pgbouncer"
+    config_file: "/Users/pgedge/pge/ibrar-lab/cluster-managment/benchmark/conf/pgbouncer.ini"
     log_file: "log/pgbouncer.log"
-    options: "-d"  # Daemon mode
+    options: ""  # pgbouncer takes config as positional arg
   
   pgpool2:
-    enabled: false
-    port: 9998
-    bin_path: ""  # Auto-detect (pgpool in PATH)
-    config_file: ""  # Auto-detect or default
+    enabled: true  # Requires increased shared memory on macOS
+    port: 9999
+    bin_path: "/opt/homebrew/opt/pgpool-ii/bin/pgpool"
+    config_file: "/Users/pgedge/pge/ibrar-lab/cluster-managment/benchmark/conf/pgpool2.conf"
     log_file: "log/pgpool2.log"
     options: "-n -D"  # Non-daemon, discard status
   

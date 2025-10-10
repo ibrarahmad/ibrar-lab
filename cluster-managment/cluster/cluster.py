@@ -894,8 +894,13 @@ $$;
         cmd_parts = [bin_path]
         if options:
             cmd_parts.extend(options.split())
+        
+        # pgbouncer takes config file as positional arg, others use -f
         if config_file:
-            cmd_parts.extend(['-f', config_file])
+            if pooler_name == 'pgbouncer':
+                cmd_parts.append(config_file)
+            else:
+                cmd_parts.extend(['-f', config_file])
         
         cmd = ' '.join(cmd_parts) + f" > {log_file} 2>&1 &"
         

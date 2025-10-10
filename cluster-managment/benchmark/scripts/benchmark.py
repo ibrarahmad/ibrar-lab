@@ -56,7 +56,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+#==============================================================================
+# Utility Functions
+#==============================================================================
+
+def run_cmd(cmd, check=True, capture=False, shell=False):
+    """Run shell command"""
+    try:
+        if capture:
+            result = subprocess.run(cmd, shell=shell, check=check, 
+                                  capture_output=True, text=True,
+                                  stdin=subprocess.PIPE, input='')
+            return result.returncode == 0, result.stdout.strip()
+        else:
+            result = subprocess.run(cmd, shell=shell, check=check,
+                                  capture_output=True, text=True,
+                                  stdin=subprocess.PIPE, input='')
+            return result.returncode == 0, ""
+    except subprocess.CalledProcessError as e:
+        return False, str(e)
+    except Exception as e:
+        return False, str(e)
+
+#==============================================================================
 # OS Detection
+#==============================================================================
+
 class OSDetector:
     """Detect and handle OS-specific operations"""
     
@@ -501,7 +526,33 @@ class BenchmarkSuite:
         # Generate benchmark data
         self._generate_benchmark_data()
         
+        # Vacuum primary database after initialization
+        self._vacuum_primary()
+        
         logger.info(f"✓ {self.config.benchmark_type.upper()} initialization completed")
+    
+    def _vacuum_primary(self):
+        """Run VACUUM ANALYZE on primary database only"""
+        logger.info("✓ Running VACUUM ANALYZE on primary database...")
+        
+        try:
+            import psycopg2
+            conn = psycopg2.connect(
+                host="localhost",
+                port=self.config.postgres_port,
+                database=self.config.postgres_database,
+                user=self.config.postgres_user,
+                password=self.config.postgres_password or '',
+                connect_timeout=10
+            )
+            conn.set_isolation_level(0)  # AUTOCOMMIT mode for VACUUM
+            cursor = conn.cursor()
+            cursor.execute("VACUUM ANALYZE;")
+            cursor.close()
+            conn.close()
+            logger.info("✓ VACUUM ANALYZE completed on primary")
+        except Exception as e:
+            logger.warning(f"⚠ VACUUM failed (non-critical): {e}")
     
     def _create_benchmark_schema(self):
         """Create benchmark schema using HammerDB"""
@@ -851,8 +902,105 @@ quit
             finally:
                 del self.processes[pooler_name]
     
+    def _run_pgbench_test(self, pooler_name: str, threads: int, duration: int) -> BenchmarkResult:
+        """Run benchmark test using pgbench (with -n to skip vacuum)"""
+        port = self.config.poolers[pooler_name]["port"]
+        
+        logger.info(f"✓ Running pgbench benchmark on {pooler_name} (port {port})...")
+        logger.info(f"  Clients: {threads}, Duration: {duration}s")
+        
+        # Find pgbench binary
+        pgbench_bin = shutil.which('pgbench')
+        if not pgbench_bin:
+            # Try PostgreSQL installation path
+            pgbench_bin = '/opt/homebrew/opt/postgresql@17/bin/pgbench'
+            if not Path(pgbench_bin).exists():
+                logger.error("✗ pgbench not found in PATH")
+                raise Exception("pgbench not found")
+        
+        # Monitor resources
+        start_cpu = psutil.cpu_percent(interval=1)
+        start_mem = psutil.virtual_memory().used / (1024 * 1024)  # MB
+        
+        # Run pgbench with -n to skip vacuuming
+        start_time = time.time()
+        cmd = [
+            pgbench_bin,
+            '-h', 'localhost',
+            '-p', str(port),
+            '-U', self.config.postgres_user,
+            '-c', str(threads),  # number of clients
+            '-j', str(min(threads, 4)),  # number of threads
+            '-T', str(duration),  # duration in seconds
+            '-n',  # Skip vacuuming
+            self.config.postgres_database
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        end_time = time.time()
+        
+        # Monitor resources after
+        end_cpu = psutil.cpu_percent(interval=1)
+        end_mem = psutil.virtual_memory().used / (1024 * 1024)  # MB
+        
+        # Parse pgbench results
+        tps = 0.0
+        qps = 0.0
+        latency_avg = 0.0
+        latency_p95 = 0.0
+        latency_p99 = 0.0
+        errors = 0
+        
+        for line in result.stdout.split('\n'):
+            line = line.strip()
+            
+            # Extract TPS: "tps = 1234.567890 (without initial connection time)"
+            if 'tps =' in line and 'without initial connection time' in line:
+                try:
+                    parts = line.split()
+                    tps_idx = parts.index('tps')
+                    if tps_idx + 2 < len(parts):
+                        tps = float(parts[tps_idx + 2])
+                        qps = tps * 5  # Approximate: pgbench default has ~5 queries per transaction
+                        logger.info(f"  TPS: {tps:.2f}")
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"⚠ Failed to parse TPS: {e}")
+            
+            # Extract latency: "latency average = 12.345 ms"
+            if 'latency average' in line:
+                try:
+                    parts = line.split('=')
+                    if len(parts) == 2:
+                        latency_str = parts[1].strip().split()[0]
+                        latency_avg = float(latency_str)
+                        latency_p95 = latency_avg * 1.5  # Approximate
+                        latency_p99 = latency_avg * 2.0  # Approximate
+                        logger.info(f"  Latency: {latency_avg:.2f} ms")
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"⚠ Failed to parse latency: {e}")
+        
+        return BenchmarkResult(
+            pooler_name=pooler_name,
+            benchmark_type=self.config.benchmark_type,
+            tps=tps,
+            qps=qps,
+            latency_avg=latency_avg,
+            latency_p95=latency_p95,
+            latency_p99=latency_p99,
+            errors=errors,
+            reconnects=0,
+            memory_used_mb=end_mem - start_mem,
+            cpu_usage=(start_cpu + end_cpu) / 2,
+            timestamp=time.strftime("%Y-%m-%d %H:%M:%S")
+        )
+    
     def _run_benchmark_test(self, pooler_name: str, threads: int, duration: int) -> BenchmarkResult:
-        """Run benchmark test using HammerDB"""
+        """Run benchmark test using HammerDB or pgbench"""
+        
+        # Use pgbench for simple benchmarks, HammerDB for TPC-C/TPC-H
+        if self.config.benchmark_type in ['pgbench', 'tpcb']:
+            return self._run_pgbench_test(pooler_name, threads, duration)
+        
         port = self.config.poolers[pooler_name]["port"]
         
         logger.info(f"✓ Running HammerDB {self.config.benchmark_type.upper()} benchmark on {pooler_name} (port {port})...")
